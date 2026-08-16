@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1"
+    />
+    <meta name="theme-color" content="#2563eb" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Склад" />
+    <title>Склад — учёт остатков</title>
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icons/icon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="./icons/icon-180.png" />
+    <link rel="stylesheet" href="./assets/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="grow">
+        <h1 id="header-title">Склад</h1>
+        <p class="subtitle" id="header-subtitle">Учёт остатков</p>
+      </div>
+      <button class="icon-btn" id="header-action" title="Добавить" hidden>＋</button>
+    </header>
+
+    <main>
+      <!-- Обзор / что заказать -->
+      <section class="view active" id="view-overview" data-title="Склад" data-subtitle="Обзор">
+      </section>
+
+      <!-- Товары по категориям -->
+      <section
+        class="view"
+        id="view-items"
+        data-title="Товары"
+        data-subtitle="Категории и остатки"
+      ></section>
+
+      <!-- Быстрый ввод прихода/расхода -->
+      <section
+        class="view"
+        id="view-entry"
+        data-title="Ввод"
+        data-subtitle="Приход и расход за день"
+      ></section>
+
+      <!-- Аналитика -->
+      <section
+        class="view"
+        id="view-analytics"
+        data-title="Аналитика"
+        data-subtitle="Средний расход и заказ"
+      ></section>
+
+      <!-- Настройки -->
+      <section
+        class="view"
+        id="view-settings"
+        data-title="Настройки"
+        data-subtitle="Рабочие дни, данные"
+      ></section>
+    </main>
+
+    <nav class="tabbar" id="tabbar">
+      <button data-tab="overview" class="active">
+        <span class="ic">🏠</span><span>Обзор</span>
+      </button>
+      <button data-tab="entry"><span class="ic">➕</span><span>Ввод</span></button>
+      <button data-tab="items"><span class="ic">📦</span><span>Товары</span></button>
+      <button data-tab="analytics"><span class="ic">📊</span><span>Аналитика</span></button>
+      <button data-tab="settings"><span class="ic">⚙️</span><span>Ещё</span></button>
+    </nav>
+
+    <!-- Нижний лист (формы) -->
+    <div class="sheet-backdrop" id="sheet-backdrop">
+      <div class="sheet" id="sheet" role="dialog" aria-modal="true">
+        <div class="grabber"></div>
+        <div id="sheet-content"></div>
+      </div>
+    </div>
+
+    <input type="file" id="import-file" accept="application/json,.json" hidden />
+
+    <div class="toast" id="toast"></div>
+
+    <script type="module" src="./assets/app.js"></script>
+  </body>
+</html>
