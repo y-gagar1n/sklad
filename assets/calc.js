@@ -81,9 +81,26 @@ export function stockAsOf(movements, asOfISO) {
 
 // ── Расход и средние ─────────────────────────────────────────────────────────
 
-// Только реальный расход (type==='out', не корректировки инвентаризации).
+// Только реальный расход: списание (type==='out'), но не корректировки
+// инвентаризации (adjust) и не переносы между этажами (transfer).
 export function realConsumption(movements) {
-  return movements.filter((m) => m.type === "out" && !m.adjust);
+  return movements.filter((m) => m.type === "out" && !m.adjust && !m.transfer);
+}
+
+// Реальный приход (закупка): type==='in', без инвентаризации и переносов.
+export function realReceipts(movements) {
+  return movements.filter((m) => m.type === "in" && !m.adjust && !m.transfer);
+}
+
+// Суммарный приход в окне [fromISO, toISO] включительно.
+export function sumReceipts(movements, fromISO, toISO) {
+  let sum = 0;
+  for (const m of realReceipts(movements)) {
+    if (diffDays(fromISO, m.date) < 0) continue;
+    if (diffDays(m.date, toISO) < 0) continue;
+    sum += m.qty;
+  }
+  return round2(sum);
 }
 
 // Суммарный расход в окне [fromISO, toISO] включительно.

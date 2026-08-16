@@ -551,6 +551,64 @@ select:focus {
   font-weight: 700;
 }
 
+/* Панель этажей */
+.floor-bar {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0 12px;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.floor-bar::-webkit-scrollbar {
+  display: none;
+}
+.floor-chip {
+  flex: none;
+  min-height: 40px;
+  padding: 0 16px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 15px;
+}
+.floor-chip.on {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+.floor-chip.add {
+  width: 42px;
+  padding: 0;
+  font-size: 20px;
+  color: var(--accent);
+}
+
+/* Сегментированный переключатель */
+.segmented {
+  display: flex;
+  gap: 4px;
+  background: var(--surface-2);
+  border-radius: 12px;
+  padding: 4px;
+  margin-bottom: 14px;
+}
+.segmented .seg {
+  flex: 1;
+  min-height: 40px;
+  border-radius: 9px;
+  font-weight: 600;
+  font-size: 15px;
+  color: var(--text-dim);
+}
+.segmented .seg.on {
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+
 .spacer {
   height: 8px;
 }

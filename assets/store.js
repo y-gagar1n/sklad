@@ -11,6 +11,7 @@ function uid() {
 }
 
 function defaultState() {
+  const floorId = uid();
   return {
     version: VERSION,
     settings: {
@@ -21,10 +22,29 @@ function defaultState() {
       // Окно усреднения расхода, дней.
       windowDays: 30,
     },
+    // Этажи: у каждого свой остаток; категории и товары общие для всех этажей.
+    floors: [{ id: floorId, name: "Этаж 1", order: 0 }],
+    activeFloorId: floorId,
     categories: [],
     items: [],
     movements: [],
   };
+}
+
+// Гарантируем наличие хотя бы одного этажа, корректный активный этаж и
+// проставленный floorId у всех движений (миграция старых данных без этажей).
+function ensureFloors(st) {
+  if (!Array.isArray(st.floors)) st.floors = [];
+  if (st.floors.length === 0) {
+    st.floors.push({ id: uid(), name: "Этаж 1", order: 0 });
+  }
+  const ids = new Set(st.floors.map((f) => f.id));
+  if (!st.activeFloorId || !ids.has(st.activeFloorId)) {
+    st.activeFloorId = st.floors[0].id;
+  }
+  const def = st.floors[0].id;
+  for (const m of st.movements) if (!m.floorId) m.floorId = def;
+  return st;
 }
 
 let state = load();
@@ -47,6 +67,8 @@ function normalize(s) {
   const out = {
     version: VERSION,
     settings: { ...base.settings, ...(s.settings || {}) },
+    floors: Array.isArray(s.floors) ? s.floors : [],
+    activeFloorId: s.activeFloorId || null,
     categories: Array.isArray(s.categories) ? s.categories : [],
     items: Array.isArray(s.items) ? s.items : [],
     movements: Array.isArray(s.movements) ? s.movements : [],
@@ -54,7 +76,7 @@ function normalize(s) {
   if (!Array.isArray(out.settings.workingDays) || !out.settings.workingDays.length) {
     out.settings.workingDays = base.settings.workingDays;
   }
-  return out;
+  return ensureFloors(out);
 }
 
 function persist() {
@@ -102,14 +124,78 @@ export function getCategory(id) {
   return state.categories.find((c) => c.id === id) || null;
 }
 
-export function movementsForItem(id) {
+export function movementsForItem(id, floorId = state.activeFloorId) {
   return state.movements
-    .filter((m) => m.itemId === id)
+    .filter((m) => m.itemId === id && (floorId == null || m.floorId === floorId))
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 }
 
-export function stockForItem(id) {
-  return stockOf(movementsForItem(id));
+export function stockForItem(id, floorId = state.activeFloorId) {
+  return stockOf(movementsForItem(id, floorId));
+}
+
+// ── Этажи ────────────────────────────────────────────────────────────────
+
+export function floors() {
+  return [...state.floors].sort((a, b) => a.order - b.order);
+}
+
+export function getFloor(id) {
+  return state.floors.find((f) => f.id === id) || null;
+}
+
+export function getActiveFloorId() {
+  return state.activeFloorId;
+}
+
+export function getActiveFloor() {
+  return getFloor(state.activeFloorId);
+}
+
+export function setActiveFloor(id) {
+  if (getFloor(id)) {
+    state.activeFloorId = id;
+    persist();
+  }
+}
+
+export function addFloor(name) {
+  const floor = { id: uid(), name: String(name).trim() || "Этаж", order: state.floors.length };
+  state.floors.push(floor);
+  persist();
+  return floor;
+}
+
+export function renameFloor(id, name) {
+  const f = getFloor(id);
+  if (f) {
+    f.name = String(name).trim() || f.name;
+    persist();
+  }
+}
+
+// Удаление этажа вместе с его движениями. Последний этаж удалить нельзя.
+export function deleteFloor(id) {
+  if (state.floors.length <= 1) return false;
+  state.floors = state.floors.filter((f) => f.id !== id);
+  state.movements = state.movements.filter((m) => m.floorId !== id);
+  if (state.activeFloorId === id) state.activeFloorId = state.floors[0].id;
+  persist();
+  return true;
+}
+
+// Перенос количества товара с этажа на этаж. Расход/приход-переносы помечены
+// transfer:true и не учитываются в среднем расходе (это перемещение, не расход).
+export function transferStock(itemId, fromFloorId, toFloorId, qty, date = todayISO()) {
+  const amount = Math.abs(Number(qty) || 0);
+  if (amount <= 0 || fromFloorId === toFloorId) return false;
+  const from = getFloor(fromFloorId);
+  const to = getFloor(toFloorId);
+  if (!from || !to) return false;
+  const note = `Перенос: ${from.name} → ${to.name}`;
+  addMovement(itemId, { date, type: "out", qty: amount, transfer: true, floorId: fromFloorId, note });
+  addMovement(itemId, { date, type: "in", qty: amount, transfer: true, floorId: toFloorId, note });
+  return true;
 }
 
 // ── Настройки ──────────────────────────────────────────────────────────────
@@ -184,14 +270,19 @@ export function deleteItem(id) {
 
 // ── Движения (приход / расход / инвентаризация) ───────────────────────────
 
-export function addMovement(itemId, { date, type, qty, note = "", adjust = false }) {
+export function addMovement(
+  itemId,
+  { date, type, qty, note = "", adjust = false, transfer = false, floorId },
+) {
   const m = {
     id: uid(),
     itemId,
+    floorId: floorId || state.activeFloorId,
     date: date || todayISO(),
     type, // 'in' | 'out'
     qty: Math.abs(Number(qty) || 0),
     adjust: !!adjust,
+    transfer: !!transfer,
     note: String(note || ""),
   };
   state.movements.push(m);
@@ -202,8 +293,14 @@ export function addMovement(itemId, { date, type, qty, note = "", adjust = false
 // Инвентаризация: выставить фактический остаток на дату.
 // Разницу с текущим складываем как корректировочное движение (adjust:true),
 // поэтому остаток всегда пересчитывается из истории.
-export function setStock(itemId, targetQty, date = todayISO(), note = "Инвентаризация") {
-  const current = stockForItem(itemId);
+export function setStock(
+  itemId,
+  targetQty,
+  date = todayISO(),
+  note = "Инвентаризация",
+  floorId = state.activeFloorId,
+) {
+  const current = stockForItem(itemId, floorId);
   const delta = Number(targetQty) - current;
   if (delta === 0) return null;
   return addMovement(itemId, {
@@ -211,6 +308,7 @@ export function setStock(itemId, targetQty, date = todayISO(), note = "Инве�
     type: delta > 0 ? "in" : "out",
     qty: Math.abs(delta),
     adjust: true,
+    floorId,
     note,
   });
 }

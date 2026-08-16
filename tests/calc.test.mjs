@@ -14,6 +14,8 @@ import {
   stockOf,
   stockAsOf,
   sumConsumption,
+  sumReceipts,
+  realConsumption,
   averageDailyConsumption,
   weeklyAverage,
   monthlyAverage,
@@ -139,6 +141,32 @@ test("averageDailyConsumption — календарные дни", () => {
     workingDays: WD,
   });
   assert.equal(avg, 10);
+});
+
+test("переносы между этажами не считаются расходом/приходом", () => {
+  const m = [
+    mv("2026-08-10", "in", 100),
+    mv("2026-08-11", "out", 5),
+    { date: "2026-08-12", type: "out", qty: 17, transfer: true }, // перенос на др. этаж
+    { date: "2026-08-12", type: "in", qty: 3, transfer: true }, // перенос сюда
+  ];
+  // Расход = только реальное списание 5 (перенос-out игнорируется).
+  assert.equal(sumConsumption(m, "2026-08-01", "2026-08-31"), 5);
+  // Приход = только реальная закупка 100 (перенос-in игнорируется).
+  assert.equal(sumReceipts(m, "2026-08-01", "2026-08-31"), 100);
+  // Но на остаток переносы влияют: 100 - 5 - 17 + 3 = 81.
+  assert.equal(stockOf(m), 81);
+  assert.equal(realConsumption(m).length, 1);
+});
+
+test("sumReceipts: приход в окне, без инвентаризации", () => {
+  const m = [
+    mv("2026-08-05", "in", 40),
+    mv("2026-08-06", "in", 10, true), // инвентаризация — не приход
+    mv("2026-08-20", "in", 99), // вне окна
+    mv("2026-08-07", "out", 5),
+  ];
+  assert.equal(sumReceipts(m, "2026-08-01", "2026-08-10"), 40);
 });
 
 test("averageDailyConsumption без движений = 0", () => {

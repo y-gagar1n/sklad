@@ -4,13 +4,9 @@ import * as store from "./store.js";
 import { parseWorkbook } from "./xlsx-import.js";
 import {
   itemSummary,
-  stockOf,
-  averageDailyConsumption,
-  weeklyAverage,
-  monthlyAverage,
-  daysOfStock,
-  recommendedOrder,
-  urgency,
+  addDays,
+  sumConsumption,
+  sumReceipts,
   todayISO,
   URGENCY,
 } from "./calc.js";
@@ -124,6 +120,22 @@ function render() {
   RENDERERS[currentTab]();
 }
 
+// Панель этажей — быстрое переключение. Показываем на экранах, привязанных к
+// этажу (Обзор, Ввод, Товары, Аналитика). Категории и товары общие, остаток свой.
+function floorBar() {
+  const fl = store.floors();
+  const active = store.getActiveFloorId();
+  return `<div class="floor-bar">
+    ${fl
+      .map(
+        (f) =>
+          `<button class="floor-chip ${f.id === active ? "on" : ""}" data-floor="${f.id}">${esc(f.name)}</button>`,
+      )
+      .join("")}
+    <button class="floor-chip add" data-act="add-floor" title="Добавить этаж">＋</button>
+  </div>`;
+}
+
 // ── Экран: Обзор ───────────────────────────────────────────────────────────
 
 function renderOverview() {
@@ -157,7 +169,9 @@ function renderOverview() {
   const critCount = rows.filter((r) => r.s.urgency === URGENCY.CRITICAL).length;
   const soonCount = rows.filter((r) => r.s.urgency === URGENCY.SOON).length;
 
-  let html = `
+  let html =
+    floorBar() +
+    `
     <div class="metric-grid">
       <div class="metric">
         <div class="label">Позиций</div>
@@ -233,7 +247,8 @@ function renderItems() {
   const view = $("#view-items");
   const cats = store.categories();
 
-  let html = `<button class="btn block" data-act="add-cat">＋ Категория</button>`;
+  let html =
+    floorBar() + `<button class="btn block" data-act="add-cat">＋ Категория</button>`;
 
   if (cats.length === 0) {
     html += emptyStateInline(
@@ -302,12 +317,14 @@ function renderEntry() {
     return;
   }
 
-  let html = `
+  let html =
+    floorBar() +
+    `
     <label class="field">
       <span class="lbl">Дата</span>
       <input type="date" id="entry-date" value="${entryDate}" max="${todayISO()}" />
     </label>
-    <p class="hint">Нажмите «Приход» или «Расход» у нужного товара — впишите количество за выбранный день.</p>`;
+    <p class="hint">Приход/расход записываются на выбранный этаж. Нажмите «Приход» или «Расход» у нужного товара.</p>`;
 
   html += cats
     .map((c) => {
@@ -340,36 +357,85 @@ function renderEntry() {
   });
 }
 
-// ── Экран: Аналитика ──────────────────────────────────────────────────────
+// ── Экран: Аналитика (Заказать / Отчёт за период) ─────────────────────────
+
+let analyticsMode = "order"; // 'order' | 'report'
+let reportFrom = addDays(todayISO(), -29);
+let reportTo = todayISO();
 
 function renderAnalytics() {
   const view = $("#view-analytics");
-  const cats = store.categories();
   const items = store.allItems();
 
   if (items.length === 0) {
     view.innerHTML = emptyState(
       "📊",
       "Нет данных",
-      "Добавьте товары и внесите приход/расход — здесь появятся средние и рекомендации по заказу.",
+      "Добавьте товары и внесите приход/расход — здесь появятся списки заказа и отчёты.",
       "",
     );
     return;
   }
 
+  let html =
+    floorBar() +
+    `<div class="segmented">
+      <button class="seg ${analyticsMode === "order" ? "on" : ""}" data-mode="order">Заказать</button>
+      <button class="seg ${analyticsMode === "report" ? "on" : ""}" data-mode="report">Отчёт за период</button>
+    </div>`;
+
+  html += analyticsMode === "order" ? analyticsOrder() : analyticsReport();
+  view.innerHTML = html;
+
+  if (analyticsMode === "report") {
+    $("#rep-from")?.addEventListener("change", (e) => {
+      reportFrom = e.target.value || reportFrom;
+      renderAnalytics();
+    });
+    $("#rep-to")?.addEventListener("change", (e) => {
+      reportTo = e.target.value || reportTo;
+      renderAnalytics();
+    });
+  }
+}
+
+// Список заказа: что и сколько заказать, по позициям (единицы разные — не суммируем).
+function analyticsOrder() {
   const opts = store.calcOpts();
+  const cats = store.categories();
   const st = store.getSettings();
-  const mode = st.workingDaysOnly ? "по рабочим дням" : "по всем дням";
+  const modeTxt = st.workingDaysOnly ? "по рабочим дням" : "по всем дням";
+  const rows = store
+    .allItems()
+    .map((it) => ({ it, s: itemSummary(store.movementsForItem(it.id), it, opts) }));
 
-  let totalOrder = 0;
-  const rows = items.map((it) => {
-    const s = itemSummary(store.movementsForItem(it.id), it, opts);
-    totalOrder += s.order;
-    return { it, s };
-  });
+  const toOrder = rows
+    .filter((r) => r.s.order > 0)
+    .sort(
+      (a, b) =>
+        urgencyOrder(a.s.urgency) - urgencyOrder(b.s.urgency) || b.s.order - a.s.order,
+    );
 
-  let html = `<p class="hint">Средние считаются за последние ${st.windowDays} дн. (${mode}). Изменить — во вкладке «Ещё».</p>`;
+  let html = "";
+  if (toOrder.length === 0) {
+    html += `<div class="card card-pad" style="text-align:center">
+      <div class="big-emoji" style="font-size:36px">✅</div>
+      <div style="font-weight:700;margin-top:6px">Заказывать нечего</div>
+      <div class="muted">Запасов достаточно.</div>
+    </div>`;
+  } else {
+    html += `<div class="card card-pad row between">
+      <div><div class="muted">Заказать на след. месяц</div>
+      <div class="big-num" style="color:var(--accent);margin-top:2px">${toOrder.length} <span style="font-size:16px">поз.</span></div></div>
+      <div style="font-size:40px">🧾</div>
+    </div>`;
+    html += `<div class="card">` + toOrder.map((r) => orderRow(r.it, r.s)).join("") + `</div>`;
+    html += `<p class="hint">Сколько заказать = месячный расход + неснижаемый остаток − текущий остаток. Показываем списком по позициям, а не одной суммой — единицы у товаров разные.</p>`;
+  }
 
+  // Средние по категориям.
+  html += `<h2 class="section-title">Средние по категориям</h2>`;
+  html += `<p class="hint" style="margin-top:0">Считаются за последние ${st.windowDays} дн. (${modeTxt}), по текущему этажу.</p>`;
   html += cats
     .map((c) => {
       const its = store.itemsOf(c.id);
@@ -378,7 +444,6 @@ function renderAnalytics() {
       const catWeek = catRows.reduce((s, r) => s + r.s.weeklyAvg, 0);
       const catMonth = catRows.reduce((s, r) => s + r.s.monthlyAvg, 0);
       const catStock = catRows.reduce((s, r) => s + r.s.stock, 0);
-
       let inner = `<div class="cat-head">
         <span>${esc(c.name)}</span>
         <span class="cat-stock">ост. ${fmt(catStock)}</span>
@@ -389,11 +454,9 @@ function renderAnalytics() {
           <div class="metric"><div class="label">Расход / месяц</div><div class="value">${fmt(catMonth)}</div></div>
         </div>
       </div>`;
-
       inner += catRows
         .map(({ it, s }) => {
-          const daysTxt =
-            s.daysLeft === Infinity ? "—" : `${fmt(s.daysLeft)} дн.`;
+          const daysTxt = s.daysLeft === Infinity ? "—" : `${fmt(s.daysLeft)} дн.`;
           return `<div class="card-pad" style="border-top:1px solid var(--border)" data-item="${it.id}">
             <div class="row between">
               <div class="grow truncate"><b>${esc(it.name)}</b> <span class="badge ${s.urgency}">${URGENCY_LABEL[s.urgency]}</span></div>
@@ -406,26 +469,82 @@ function renderAnalytics() {
             <div class="row" style="gap:16px;margin-top:4px;flex-wrap:wrap">
               <span class="muted">Неделя: <b style="color:var(--text)">${fmt(s.weeklyAvg)}</b></span>
               <span class="muted">Месяц: <b style="color:var(--text)">${fmt(s.monthlyAvg)}</b></span>
-              <span class="muted">Заказать: <b style="color:var(--accent)">＋${fmt(s.order)}</b></span>
+              <span class="muted">Заказать: <b style="color:var(--accent)">＋${fmt(s.order)} ${esc(it.unit)}</b></span>
             </div>
           </div>`;
         })
         .join("");
-
       return `<div class="card">${inner}</div>`;
     })
     .join("");
 
-  html =
-    `<div class="card card-pad">
-      <div class="row between">
-        <div><div class="muted">Заказать на след. месяц</div><div class="big-num" style="color:var(--accent);margin-top:4px">＋${fmt(totalOrder)}</div></div>
-        <div style="font-size:40px">🧾</div>
-      </div>
-      <div class="hint">Суммарно по всем позициям: месячный расход + неснижаемый остаток − текущий остаток.</div>
-    </div>` + html;
+  return html;
+}
 
-  view.innerHTML = html;
+// Отчёт за период: приход и расход по каждому товару и категории за диапазон дат.
+function analyticsReport() {
+  const cats = store.categories();
+  const from = reportFrom;
+  const to = reportTo;
+  const inStr = (n) => (n ? "＋" + fmt(n) : "0");
+  const outStr = (n) => (n ? "−" + fmt(n) : "0");
+
+  let html = `<div class="card card-pad">
+    <div class="row" style="gap:12px">
+      <label class="field grow" style="margin:0"><span class="lbl">С</span>
+        <input type="date" id="rep-from" value="${from}" max="${todayISO()}" /></label>
+      <label class="field grow" style="margin:0"><span class="lbl">По</span>
+        <input type="date" id="rep-to" value="${to}" max="${todayISO()}" /></label>
+    </div>
+    <div class="row" style="gap:8px;margin-top:10px">
+      ${[[7, "7 дней"], [30, "30 дней"], [90, "90 дней"]]
+        .map(([n, l]) => `<button class="btn secondary small grow" data-range="${n}">${l}</button>`)
+        .join("")}
+    </div>
+  </div>`;
+
+  let gIn = 0;
+  let gOut = 0;
+  const blocks = cats
+    .map((c) => {
+      const its = store.itemsOf(c.id);
+      let cin = 0;
+      let cout = 0;
+      const lines = [];
+      for (const it of its) {
+        const mv = store.movementsForItem(it.id);
+        const inSum = sumReceipts(mv, from, to);
+        const outSum = sumConsumption(mv, from, to);
+        if (inSum === 0 && outSum === 0) continue;
+        cin += inSum;
+        cout += outSum;
+        lines.push(`<div class="mv-line">
+          <div class="grow truncate">${esc(it.name)} <span class="muted">${esc(it.unit)}</span></div>
+          <span class="mv-qty in">${inStr(inSum)}</span>
+          <span class="mv-qty out">${outStr(outSum)}</span>
+        </div>`);
+      }
+      if (!lines.length) return "";
+      gIn += cin;
+      gOut += cout;
+      return `<div class="card">
+        <div class="cat-head"><span>${esc(c.name)}</span>
+          <span class="cat-stock"><span style="color:var(--in)">${inStr(cin)}</span> · <span style="color:var(--out)">${outStr(cout)}</span></span>
+        </div>
+        <div class="card-pad">${lines.join("")}</div>
+      </div>`;
+    })
+    .join("");
+
+  html += `<div class="card card-pad">
+    <div class="row between">
+      <div><div class="muted">Приход за период</div><div class="big-num" style="color:var(--in)">${inStr(gIn)}</div></div>
+      <div style="text-align:right"><div class="muted">Расход за период</div><div class="big-num" style="color:var(--out)">${outStr(gOut)}</div></div>
+    </div>
+    <div class="hint">${fmtDate(from)} — ${fmtDate(to)} · этаж «${esc(store.getActiveFloor()?.name || "")}». Переносы между этажами не учитываются.</div>
+  </div>`;
+  html += blocks || `<div class="empty">За выбранный период движений нет.</div>`;
+  return html;
 }
 
 // ── Экран: Настройки ──────────────────────────────────────────────────────
@@ -435,8 +554,25 @@ function renderSettings() {
   const st = store.getSettings();
   const order = [1, 2, 3, 4, 5, 6, 0]; // Пн..Вс
 
+  const fl = store.floors();
   view.innerHTML = `
-    <h2 class="section-title">Рабочие дни</h2>
+    <h2 class="section-title">Этажи</h2>
+    <div class="card">
+      ${fl
+        .map(
+          (f) => `<div class="list-item">
+        <div class="grow"><div class="name">${esc(f.name)}</div></div>
+        <button class="icon-btn" data-floor-edit="${f.id}" title="Переименовать" style="width:40px;height:40px;font-size:16px">✎</button>
+        ${fl.length > 1 ? `<button class="icon-btn" data-floor-del="${f.id}" title="Удалить" style="width:40px;height:40px;font-size:16px">🗑️</button>` : ""}
+      </div>`,
+        )
+        .join("")}
+      <div class="card-pad"><button class="btn secondary small" data-act="add-floor">＋ Этаж</button></div>
+    </div>
+    <p class="hint">У каждого этажа свой остаток; категории и товары общие. Переключение — на экранах «Обзор», «Ввод», «Товары», «Аналитика».</p>
+
+    <h2 class="section-title">Рабочие дни</h2>`;
+  view.innerHTML += `
     <div class="card card-pad">
       <p class="hint" style="margin-top:0">Средний расход можно считать только по рабочим дням.</p>
       <div class="weekday-row" id="weekday-row">
@@ -579,6 +715,8 @@ function sheetItemDetail(id) {
   const movements = store.movementsForItem(id);
   const s = itemSummary(movements, it, opts);
   const cat = store.getCategory(it.categoryId);
+  const floor = store.getActiveFloor();
+  const manyFloors = store.floors().length > 1;
 
   const daysTxt = s.daysLeft === Infinity ? "нет расхода" : `${fmt(s.daysLeft)} дн.`;
   const recent = [...movements].reverse().slice(0, 8);
@@ -591,7 +729,7 @@ function sheetItemDetail(id) {
     </div>
 
     <div class="card-pad" style="background:var(--surface-2);border-radius:var(--radius-sm);text-align:center;margin-bottom:14px">
-      <div class="muted">Остаток на сегодня</div>
+      <div class="muted">Остаток · этаж «${esc(floor?.name || "")}»</div>
       <div class="big-num" style="margin-top:6px">${fmt(s.stock)} <span style="font-size:18px">${esc(it.unit)}</span></div>
     </div>
 
@@ -616,6 +754,11 @@ function sheetItemDetail(id) {
       <button class="step-btn in" data-mv="in" data-item="${id}">Приход</button>
     </div>
     <button class="btn secondary block" data-act="inventory" data-item="${id}">📋 Инвентаризация (задать остаток)</button>
+    ${
+      manyFloors
+        ? `<div class="spacer"></div><button class="btn secondary block" data-act="transfer" data-item="${id}">🔀 Перенести на другой этаж</button>`
+        : ""
+    }
 
     <h2 class="section-title">Последние движения</h2>
     ${
@@ -626,7 +769,7 @@ function sheetItemDetail(id) {
         <span class="mv-qty ${m.type}">${m.type === "in" ? "＋" : "−"}${fmt(m.qty)}</span>
         <div class="grow">
           <div>${fmtDate(m.date)}</div>
-          <div class="muted">${m.adjust ? "инвентаризация" : m.type === "in" ? "приход" : "расход"}${m.note && !m.adjust ? " · " + esc(m.note) : ""}</div>
+          <div class="muted">${m.transfer ? "перенос" : m.adjust ? "инвентаризация" : m.type === "in" ? "приход" : "расход"}${m.note && (m.transfer || !m.adjust) ? " · " + esc(m.note) : ""}</div>
         </div>
         <button class="icon-btn" data-del-mv="${m.id}" title="Удалить" style="width:40px;height:40px;font-size:18px">🗑️</button>
       </div>`,
@@ -726,6 +869,100 @@ function sheetInventory(itemId) {
     closeSheet();
     render();
     toast("Остаток обновлён");
+  });
+}
+
+function sheetTransfer(itemId) {
+  const it = store.getItem(itemId);
+  if (!it) return;
+  const fromId = store.getActiveFloorId();
+  const from = store.getFloor(fromId);
+  const others = store.floors().filter((f) => f.id !== fromId);
+  if (!others.length) {
+    toast("Нужен ещё один этаж");
+    return;
+  }
+  const cur = store.stockForItem(itemId, fromId);
+  openSheet(`
+    <h3>Перенести: ${esc(it.name)}</h3>
+    <div class="muted" style="margin-bottom:14px">С этажа «${esc(from?.name || "")}» · сейчас ${fmt(cur)} ${esc(it.unit)}</div>
+    <label class="field">
+      <span class="lbl">Куда</span>
+      <select id="f-to">
+        ${others.map((f) => `<option value="${f.id}">${esc(f.name)}</option>`).join("")}
+      </select>
+    </label>
+    <label class="field">
+      <span class="lbl">Сколько перенести (${esc(it.unit)})</span>
+      <input id="f-qty" type="number" inputmode="decimal" step="any" min="0" placeholder="0" />
+    </label>
+    <div class="row" style="gap:8px;margin-bottom:14px">
+      ${[1, 5, 10].map((p) => `<button class="btn secondary small grow" data-preset="${p}">+${p}</button>`).join("")}
+      <button class="btn secondary small grow" data-preset-all>Все ${fmt(cur)}</button>
+    </div>
+    <button class="btn block" data-save="transfer">🔀 Перенести</button>
+  `);
+  focusFirst();
+  const qtyEl = $("#f-qty");
+  $$("[data-preset]").forEach((b) =>
+    b.addEventListener("click", () => {
+      qtyEl.value = String(parseNum(qtyEl.value) + Number(b.dataset.preset));
+    }),
+  );
+  $("[data-preset-all]")?.addEventListener("click", () => {
+    qtyEl.value = String(cur);
+  });
+  $('[data-save="transfer"]').addEventListener("click", () => {
+    const qty = parseNum(qtyEl.value);
+    if (qty <= 0) return toast("Введите количество");
+    const toId = $("#f-to").value;
+    const toName = store.getFloor(toId)?.name || "";
+    store.transferStock(itemId, fromId, toId, qty, todayISO());
+    closeSheet();
+    render();
+    toast(`Перенесено на «${toName}»`);
+  });
+}
+
+function sheetAddFloor() {
+  openSheet(`
+    <h3>Новый этаж</h3>
+    <label class="field">
+      <span class="lbl">Название</span>
+      <input id="f-name" placeholder="Напр. Этаж 3" />
+    </label>
+    <button class="btn block" data-save="floor">Добавить</button>
+  `);
+  focusFirst();
+  $('[data-save="floor"]').addEventListener("click", () => {
+    const name = $("#f-name").value.trim();
+    if (!name) return toast("Введите название");
+    const f = store.addFloor(name);
+    store.setActiveFloor(f.id);
+    closeSheet();
+    render();
+    toast("Этаж добавлен");
+  });
+}
+
+function sheetRenameFloor(id) {
+  const f = store.getFloor(id);
+  if (!f) return;
+  openSheet(`
+    <h3>Этаж</h3>
+    <label class="field">
+      <span class="lbl">Название</span>
+      <input id="f-name" value="${esc(f.name)}" />
+    </label>
+    <button class="btn block" data-save="floor-rename">Сохранить</button>
+  `);
+  focusFirst();
+  $('[data-save="floor-rename"]').addEventListener("click", () => {
+    const name = $("#f-name").value.trim();
+    if (!name) return toast("Введите название");
+    store.renameFloor(id, name);
+    closeSheet();
+    render();
   });
 }
 
@@ -844,6 +1081,14 @@ document.addEventListener("click", (e) => {
     sheetMovement(mvBtn.dataset.item, mvBtn.dataset.mv);
     return;
   }
+
+  // Переключение этажа по чипу.
+  const floorChip = t.closest("[data-floor]");
+  if (floorChip) {
+    store.setActiveFloor(floorChip.dataset.floor);
+    render();
+    return;
+  }
   // Клик по строке товара (не по кнопке) → детали.
   if (itemRow && !t.closest("button") && itemRow.dataset.item) {
     sheetItemDetail(itemRow.dataset.item);
@@ -872,6 +1117,8 @@ document.addEventListener("click", (e) => {
   }
   if (act === "inventory") return sheetInventory(t.closest("[data-item]").dataset.item);
   if (act === "edit-item") return sheetEditItem(t.closest("[data-item]").dataset.item);
+  if (act === "transfer") return sheetTransfer(t.closest("[data-item]").dataset.item);
+  if (act === "add-floor") return sheetAddFloor();
 
   const addItemCat = t.closest("[data-add-item]")?.dataset.addItem;
   if (addItemCat) return sheetAddItem(addItemCat);
@@ -894,6 +1141,18 @@ $("#view-settings").addEventListener("change", (e) => {
   }
 });
 $("#view-settings").addEventListener("click", (e) => {
+  const fe = e.target.closest("[data-floor-edit]");
+  if (fe) return sheetRenameFloor(fe.dataset.floorEdit);
+  const fd = e.target.closest("[data-floor-del]");
+  if (fd) {
+    const f = store.getFloor(fd.dataset.floorDel);
+    if (f && confirm(`Удалить этаж «${f.name}» со всеми его остатками и движениями?`)) {
+      store.deleteFloor(fd.dataset.floorDel);
+      render();
+      toast("Этаж удалён");
+    }
+    return;
+  }
   const wd = e.target.closest("[data-wd]");
   if (wd) {
     const st = store.getSettings();
@@ -906,6 +1165,23 @@ $("#view-settings").addEventListener("click", (e) => {
     render();
   }
 });
+// Аналитика: переключение режима и быстрые диапазоны отчёта.
+$("#view-analytics").addEventListener("click", (e) => {
+  const seg = e.target.closest("[data-mode]");
+  if (seg) {
+    analyticsMode = seg.dataset.mode;
+    renderAnalytics();
+    return;
+  }
+  const rng = e.target.closest("[data-range]");
+  if (rng) {
+    const n = Number(rng.dataset.range);
+    reportTo = todayISO();
+    reportFrom = addDays(todayISO(), -(n - 1));
+    renderAnalytics();
+  }
+});
+
 $("#import-file").addEventListener("change", (e) => {
   if (e.target.files[0]) importData(e.target.files[0]);
   e.target.value = "";
