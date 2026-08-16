@@ -183,8 +183,13 @@ export const URGENCY = { CRITICAL: "critical", SOON: "soon", OK: "ok" };
 export function urgency(currentStock, minStock, dailyAvg) {
   const days = daysOfStock(currentStock, dailyAvg);
   const min = minStock || 0;
-  if (currentStock <= min || days < 7) return URGENCY.CRITICAL;
-  if (days < 21 || currentStock <= min * 1.5) return URGENCY.SOON;
+  // Срочно: задан минимум и остаток не выше него, либо при текущем расходе
+  // запаса меньше недели. Без расхода и без минимума позиция не «срочная» —
+  // ей нечего заканчиваться.
+  if (min > 0 && currentStock <= min) return URGENCY.CRITICAL;
+  if (dailyAvg > 0 && days < 7) return URGENCY.CRITICAL;
+  if (min > 0 && currentStock <= min * 1.5) return URGENCY.SOON;
+  if (dailyAvg > 0 && days < 21) return URGENCY.SOON;
   return URGENCY.OK;
 }
 
@@ -216,10 +221,11 @@ export function itemSummary(movements, item, opts) {
 
 // ── Округление ────────────────────────────────────────────────────────────────
 
+// `+ 0` нормализует -0 (и микроостатки от float) в обычный 0.
 export function round1(x) {
-  return Math.round(x * 10) / 10;
+  return Math.round(x * 10) / 10 + 0;
 }
 
 export function round2(x) {
-  return Math.round(x * 100) / 100;
+  return Math.round(x * 100) / 100 + 0;
 }

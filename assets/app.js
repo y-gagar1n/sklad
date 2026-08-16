@@ -1,6 +1,7 @@
 // app.js — интерфейс приложения: навигация, экраны, формы.
 // Логика расчётов — в calc.js, данные — в store.js.
 import * as store from "./store.js";
+import { parseWorkbook } from "./xlsx-import.js";
 import {
   itemSummary,
   stockOf,
@@ -470,6 +471,9 @@ function renderSettings() {
       <div class="spacer"></div>
       <button class="btn secondary block" data-act="import">⬆️ Загрузить из файла</button>
       <div class="divider"></div>
+      <button class="btn secondary block" data-act="import-xlsx">📊 Импорт из Excel (.xlsx)</button>
+      <p class="hint" style="margin-bottom:0">Загрузите вашу Excel-таблицу — приложение само разберёт категории, товары, остатки и расход. Текущие данные будут заменены.</p>
+      <div class="divider"></div>
       <button class="btn secondary block" data-act="seed">Загрузить демо-данные</button>
       <div class="spacer"></div>
       <button class="btn danger block" data-act="wipe">Удалить все данные</button>
@@ -858,6 +862,7 @@ document.addEventListener("click", (e) => {
   if (act === "go-items") return switchTab("items");
   if (act === "export") return exportData();
   if (act === "import") return $("#import-file").click();
+  if (act === "import-xlsx") return $("#xlsx-file").click();
   if (act === "wipe") {
     if (!confirm("Удалить все данные без возможности восстановления?")) return;
     store.replaceState({});
@@ -904,6 +909,37 @@ $("#view-settings").addEventListener("click", (e) => {
 $("#import-file").addEventListener("change", (e) => {
   if (e.target.files[0]) importData(e.target.files[0]);
   e.target.value = "";
+});
+$("#xlsx-file").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  toast("Читаю файл…");
+  try {
+    const buf = await file.arrayBuffer();
+    const st = store.getSettings();
+    const parsed = await parseWorkbook(buf, {
+      today: todayISO(),
+      workingDays: st.workingDays,
+    });
+    const nCat = parsed.categories.length;
+    const nItem = parsed.items.length;
+    if (!nItem) {
+      alert("В файле не найдено товаров. Проверьте, что это таблица учёта склада.");
+      return;
+    }
+    if (
+      !confirm(
+        `Найдено категорий: ${nCat}, товаров: ${nItem}.\n\nИмпортировать? Текущие данные в приложении будут заменены.`,
+      )
+    )
+      return;
+    store.importFromParsed(parsed, todayISO());
+    switchTab("items");
+    toast(`Импортировано: ${nItem} товаров`);
+  } catch (err) {
+    alert("Не удалось разобрать файл: " + err.message);
+  }
 });
 
 // ── Старт ────────────────────────────────────────────────────────────────
