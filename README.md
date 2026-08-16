@@ -50,9 +50,11 @@ Excel-таблицы: крупные кнопки под палец, все ср
 
 Локально: откройте `index.html` в браузере (двойной клик).
 
-Онлайн (после включения GitHub Pages): деплой настроен в
-[`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml) и
-запускается при пуше в ветку. Адрес: **https://y-gagar1n.github.io/sklad/**
+Онлайн через **GitHub Pages** (сайт статический, сборка не нужна). Один раз
+включить: **Settings → Pages → Source: «Deploy from a branch»**, ветка
+`claude/warehouse-inventory-app-e7s489`, папка `/ (root)` → **Save**. Файл
+`.nojekyll` в корне заставляет Pages отдавать файлы как есть. Адрес:
+**https://y-gagar1n.github.io/sklad/**
 
 На телефоне откройте адрес и добавьте на домашний экран («Поделиться» → «На экран
 Домой») — приложение откроется на весь экран и будет работать офлайн.
