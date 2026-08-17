@@ -803,7 +803,6 @@ function sheetItemDetail(id) {
   const s = itemSummary(movements, it, opts);
   const cat = store.getCategory(it.categoryId);
   const floor = store.getActiveFloor();
-  const manyFloors = store.floors().length > 1;
 
   const daysTxt = s.daysLeft === Infinity ? "нет расхода" : `${fmt(s.daysLeft)} дн.`;
   const recent = [...movements].reverse().slice(0, 8);
@@ -841,11 +840,8 @@ function sheetItemDetail(id) {
       <button class="step-btn in" data-mv="in" data-item="${id}">Приход</button>
     </div>
     <button class="btn secondary block" data-act="inventory" data-item="${id}">📋 Инвентаризация (задать остаток)</button>
-    ${
-      manyFloors
-        ? `<div class="spacer"></div><button class="btn secondary block" data-act="transfer" data-item="${id}">🔀 Перенести на другой этаж</button>`
-        : ""
-    }
+    <div class="spacer"></div>
+    <button class="btn secondary block" data-act="transfer" data-item="${id}">🔀 Перенести на другой этаж</button>
 
     <h2 class="section-title">Последние движения</h2>
     ${
@@ -966,7 +962,15 @@ function sheetTransfer(itemId) {
   const from = store.getFloor(fromId);
   const others = store.floors().filter((f) => f.id !== fromId);
   if (!others.length) {
-    toast("Нужен ещё один этаж");
+    openSheet(`
+      <h3>Перенести: ${esc(it.name)}</h3>
+      <div class="empty" style="padding:16px 0">
+        <div class="big-emoji">🏢</div>
+        <div style="font-weight:700;color:var(--text)">Пока только один этаж</div>
+        <div style="margin-top:6px">Чтобы переносить товары между этажами, сначала добавьте второй этаж.</div>
+      </div>
+      <button class="btn block" data-act="add-floor">＋ Добавить этаж</button>
+    `);
     return;
   }
   const cur = store.stockForItem(itemId, fromId);
