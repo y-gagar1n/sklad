@@ -243,31 +243,72 @@ function orderRow(it, s) {
 
 // ── Экран: Товары ─────────────────────────────────────────────────────────
 
+let itemSearch = "";
+
 function renderItems() {
   const view = $("#view-items");
+
+  view.innerHTML =
+    floorBar() +
+    `<div class="search-row">
+      <span class="search-ic">🔍</span>
+      <input id="item-search" type="search" inputmode="search" autocomplete="off"
+        placeholder="Поиск товара или категории" value="${esc(itemSearch)}" />
+      <button class="icon-btn search-clear" id="search-clear" ${itemSearch ? "" : "hidden"} title="Очистить">✕</button>
+    </div>
+    <button class="btn block" data-act="add-cat">＋ Категория</button>
+    <div id="items-list"></div>`;
+
+  renderItemsList();
+
+  const inp = $("#item-search");
+  inp.addEventListener("input", (e) => {
+    itemSearch = e.target.value;
+    $("#search-clear").hidden = !itemSearch;
+    renderItemsList(); // обновляем только список — поле ввода и фокус сохраняются
+  });
+  $("#search-clear").addEventListener("click", () => {
+    itemSearch = "";
+    inp.value = "";
+    $("#search-clear").hidden = true;
+    renderItemsList();
+    inp.focus();
+  });
+}
+
+// Список категорий и товаров с учётом строки поиска. Перерисовывается отдельно
+// от поля ввода, чтобы при наборе не терялся фокус.
+function renderItemsList() {
+  const list = $("#items-list");
+  if (!list) return;
   const cats = store.categories();
 
-  let html =
-    floorBar() + `<button class="btn block" data-act="add-cat">＋ Категория</button>`;
-
   if (cats.length === 0) {
-    html += emptyStateInline(
+    list.innerHTML = emptyStateInline(
       "🗂️",
       "Нет категорий",
       "Начните с категории, например «Молочные продукты».",
     );
-    view.innerHTML = html;
     return;
   }
 
+  const q = itemSearch.trim().toLowerCase();
   const opts = store.calcOpts();
-  html += cats
+  let shown = 0;
+
+  const html = cats
     .map((c) => {
-      const its = store.itemsOf(c.id);
+      const catMatch = !q || c.name.toLowerCase().includes(q);
+      let its = store.itemsOf(c.id);
+      if (q && !catMatch) {
+        its = its.filter((it) => it.name.toLowerCase().includes(q));
+        if (its.length === 0) return ""; // категория не подходит и товаров нет
+      }
+      shown++;
       const total = its.reduce((sum, it) => sum + store.stockForItem(it.id), 0);
       let inner = `<div class="cat-head">
         <span data-edit-cat="${c.id}">${esc(c.name)} ✎</span>
-        <span class="cat-stock">${fmt(total)} всего</span>
+        <span class="cat-stock">${fmt(total)}${q ? "" : " всего"}</span>
       </div>`;
       if (its.length === 0) {
         inner += `<div class="list-item muted">Нет товаров</div>`;
@@ -290,12 +331,17 @@ function renderItems() {
           })
           .join("");
       }
-      inner += `<div class="card-pad"><button class="btn secondary small" data-add-item="${c.id}">＋ Товар в «${esc(c.name)}»</button></div>`;
+      if (!q) {
+        inner += `<div class="card-pad"><button class="btn secondary small" data-add-item="${c.id}">＋ Товар в «${esc(c.name)}»</button></div>`;
+      }
       return `<div class="card">${inner}</div>`;
     })
     .join("");
 
-  view.innerHTML = html;
+  list.innerHTML =
+    q && shown === 0
+      ? emptyStateInline("🔍", "Ничего не найдено", `По запросу «${esc(itemSearch.trim())}» ничего нет.`)
+      : html;
 }
 
 // ── Экран: Быстрый ввод ───────────────────────────────────────────────────

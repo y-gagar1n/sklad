@@ -551,6 +551,43 @@ select:focus {
   font-weight: 700;
 }
 
+/* Поиск */
+.search-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.search-row .search-ic {
+  position: absolute;
+  left: 14px;
+  font-size: 16px;
+  opacity: 0.55;
+  pointer-events: none;
+}
+.search-row input {
+  padding-left: 40px;
+  padding-right: 44px;
+}
+.search-clear {
+  position: absolute;
+  right: 4px;
+  width: 40px;
+  height: 40px;
+  font-size: 15px;
+  background: transparent;
+  color: var(--text-dim);
+}
+.search-clear[hidden] {
+  display: none;
+}
+/* Прячем встроенный крестик у type=search — используем свой. */
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
 /* Панель этажей */
 .floor-bar {
   display: flex;
