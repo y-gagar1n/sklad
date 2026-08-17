@@ -509,10 +509,17 @@ select:focus {
   width: 100%;
   max-width: 640px;
   border-radius: 20px 20px 0 0;
-  padding: 8px 20px calc(24px + var(--safe-bottom));
   max-height: 90vh;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  position: relative;
   animation: slideup 0.2s ease;
+  will-change: transform;
+}
+#sheet-content {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 20px calc(24px + var(--safe-bottom));
 }
 @keyframes slideup {
   from {
@@ -527,7 +534,34 @@ select:focus {
   height: 5px;
   border-radius: 3px;
   background: var(--border);
-  margin: 8px auto 14px;
+  margin: 0 auto;
+  padding: 12px 40px; /* увеличенная зона захвата для свайпа */
+  background-clip: content-box;
+  box-sizing: content-box;
+  cursor: grab;
+  touch-action: none;
+  flex: none;
+}
+.sheet-close {
+  position: absolute;
+  top: 12px;
+  right: 14px;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  color: var(--text-dim);
+  font-size: 15px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 3;
+}
+.sheet-close:active {
+  background: var(--border);
+}
+#sheet-content h3 {
+  padding-right: 40px;
 }
 .sheet h3 {
   margin: 0 0 16px;

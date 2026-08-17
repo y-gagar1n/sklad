@@ -66,7 +66,11 @@ function toast(msg) {
 // ── Нижний лист (формы) ───────────────────────────────────────────────────
 
 function openSheet(html) {
+  const sheet = $("#sheet");
+  sheet.style.transition = "";
+  sheet.style.transform = "";
   $("#sheet-content").innerHTML = html;
+  $("#sheet-content").scrollTop = 0;
   $("#sheet-backdrop").classList.add("open");
   document.body.style.overflow = "hidden";
   return $("#sheet-content");
@@ -74,10 +78,51 @@ function openSheet(html) {
 function closeSheet() {
   $("#sheet-backdrop").classList.remove("open");
   document.body.style.overflow = "";
+  const sheet = $("#sheet");
+  sheet.style.transform = "";
 }
 $("#sheet-backdrop").addEventListener("click", (e) => {
   if (e.target.id === "sheet-backdrop") closeSheet();
 });
+$("#sheet-close").addEventListener("click", closeSheet);
+
+// Свайп вниз по «ручке» листа — закрыть.
+(function sheetSwipe() {
+  const grabber = $("#sheet-grabber");
+  const sheet = $("#sheet");
+  let startY = 0;
+  let dy = 0;
+  let dragging = false;
+  grabber.addEventListener(
+    "touchstart",
+    (e) => {
+      startY = e.touches[0].clientY;
+      dy = 0;
+      dragging = true;
+      sheet.style.transition = "none";
+    },
+    { passive: true },
+  );
+  grabber.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!dragging) return;
+      dy = Math.max(0, e.touches[0].clientY - startY);
+      sheet.style.transform = `translateY(${dy}px)`;
+      e.preventDefault();
+    },
+    { passive: false },
+  );
+  const end = () => {
+    if (!dragging) return;
+    dragging = false;
+    sheet.style.transition = "";
+    if (dy > 90) closeSheet();
+    sheet.style.transform = "";
+  };
+  grabber.addEventListener("touchend", end);
+  grabber.addEventListener("touchcancel", end);
+})();
 
 // ── Навигация ──────────────────────────────────────────────────────────────
 
