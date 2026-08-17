@@ -346,7 +346,8 @@ function renderItemsList() {
           ${caret}<span class="truncate">${esc(c.name)}</span>
         </span>
         <span class="cat-stock nowrap">${rightTxt}</span>
-        <button class="icon-btn cat-edit" data-edit-cat="${c.id}" title="Изменить">✎</button>
+        <button class="icon-btn cat-edit" data-add-item="${c.id}" title="Добавить товар">＋</button>
+        <button class="icon-btn cat-edit" data-edit-cat="${c.id}" title="Переименовать">✎</button>
       </div>`;
 
       if (!collapsed) {
@@ -370,9 +371,6 @@ function renderItemsList() {
             </div>`;
             })
             .join("");
-        }
-        if (!q) {
-          inner += `<div class="card-pad"><button class="btn secondary small" data-add-item="${c.id}">＋ Товар в «${esc(c.name)}»</button></div>`;
         }
       }
       return `<div class="card">${inner}</div>`;
@@ -789,6 +787,9 @@ function sheetAddItem(categoryId) {
       unit: $("#f-unit").value.trim() || "шт",
       minStock: parseNum($("#f-min").value),
     });
+    // Разворачиваем категорию, чтобы новый товар был виден.
+    collapsedCats.delete(categoryId);
+    saveCollapsed();
     closeSheet();
     render();
     toast("Товар добавлен");

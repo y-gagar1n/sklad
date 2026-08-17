@@ -1,6 +1,6 @@
 // Service worker — офлайн-режим. Кэшируем оболочку приложения.
 // Данные пользователя тут не хранятся (они в localStorage), только код и стили.
-const CACHE = "sklad-v8";
+const CACHE = "sklad-v9";
 const ASSETS = [
   "./",
   "./index.html",
