@@ -192,6 +192,8 @@ export function transferStock(itemId, fromFloorId, toFloorId, qty, date = todayI
   const from = getFloor(fromFloorId);
   const to = getFloor(toFloorId);
   if (!from || !to) return false;
+  // Нельзя перенести больше, чем есть на исходном этаже.
+  if (amount > stockForItem(itemId, fromFloorId)) return false;
   const note = `Перенос: ${from.name} → ${to.name}`;
   addMovement(itemId, { date, type: "out", qty: amount, transfer: true, floorId: fromFloorId, note });
   addMovement(itemId, { date, type: "in", qty: amount, transfer: true, floorId: toFloorId, note });

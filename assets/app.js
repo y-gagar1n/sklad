@@ -917,6 +917,13 @@ function sheetMovement(itemId, type) {
   $('[data-save="mv"]').addEventListener("click", () => {
     const qty = parseNum(qtyEl.value);
     if (qty <= 0) return toast("Введите количество");
+    // Нельзя списать больше, чем есть — остаток не должен уходить в минус.
+    if (!isIn) {
+      const stock = store.stockForItem(itemId);
+      if (qty > stock) {
+        return toast(`Нельзя списать больше остатка: ${fmt(stock)} ${it.unit}`);
+      }
+    }
     store.addMovement(itemId, {
       type,
       qty,
@@ -948,6 +955,7 @@ function sheetInventory(itemId) {
   focusFirst();
   $('[data-save="inv"]').addEventListener("click", () => {
     const val = parseNum($("#f-qty").value);
+    if (val < 0) return toast("Остаток не может быть отрицательным");
     store.setStock(itemId, val, $("#f-date").value || todayISO());
     closeSheet();
     render();
@@ -1006,6 +1014,11 @@ function sheetTransfer(itemId) {
   $('[data-save="transfer"]').addEventListener("click", () => {
     const qty = parseNum(qtyEl.value);
     if (qty <= 0) return toast("Введите количество");
+    // Нельзя перенести больше, чем есть на исходном этаже.
+    const avail = store.stockForItem(itemId, fromId);
+    if (qty > avail) {
+      return toast(`Нельзя перенести больше остатка: ${fmt(avail)} ${it.unit}`);
+    }
     const toId = $("#f-to").value;
     const toName = store.getFloor(toId)?.name || "";
     store.transferStock(itemId, fromId, toId, qty, todayISO());
@@ -1028,8 +1041,7 @@ function sheetAddFloor() {
   $('[data-save="floor"]').addEventListener("click", () => {
     const name = $("#f-name").value.trim();
     if (!name) return toast("Введите название");
-    const f = store.addFloor(name);
-    store.setActiveFloor(f.id);
+    store.addFloor(name); // активный этаж не меняем — переключиться можно чипом
     closeSheet();
     render();
     toast("Этаж добавлен");
