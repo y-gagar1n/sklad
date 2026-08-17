@@ -245,6 +245,31 @@ function orderRow(it, s) {
 
 let itemSearch = "";
 
+// Свёрнутые категории (id). Помним между сессиями в отдельном ключе.
+const COLLAPSE_KEY = "sklad-collapsed";
+let collapsedCats = new Set(loadCollapsed());
+function loadCollapsed() {
+  try {
+    return JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "[]");
+  } catch {
+    return [];
+  }
+}
+function saveCollapsed() {
+  localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsedCats]));
+}
+
+// Кнопка «Свернуть все / Развернуть все» — вне поиска и если есть категории.
+function collapseAllRow() {
+  if (itemSearch.trim()) return "";
+  const cats = store.categories();
+  if (!cats.length) return "";
+  const allCollapsed = cats.every((c) => collapsedCats.has(c.id));
+  return `<div style="text-align:right;margin:-4px 0 10px">
+    <button class="btn secondary small" data-act="toggle-all-cats">${allCollapsed ? "Развернуть все" : "Свернуть все"}</button>
+  </div>`;
+}
+
 function renderItems() {
   const view = $("#view-items");
 
@@ -257,6 +282,7 @@ function renderItems() {
       <button class="icon-btn search-clear" id="search-clear" ${itemSearch ? "" : "hidden"} title="Очистить">✕</button>
     </div>
     <button class="btn block" data-act="add-cat">＋ Категория</button>
+    ${collapseAllRow()}
     <div id="items-list"></div>`;
 
   renderItemsList();
@@ -306,17 +332,31 @@ function renderItemsList() {
       }
       shown++;
       const total = its.reduce((sum, it) => sum + store.stockForItem(it.id), 0);
-      let inner = `<div class="cat-head">
-        <span data-edit-cat="${c.id}">${esc(c.name)} ✎</span>
-        <span class="cat-stock">${fmt(total)}${q ? "" : " всего"}</span>
+      // Сворачивать можно только вне поиска (в поиске всегда показываем совпадения).
+      const canCollapse = !q;
+      const collapsed = canCollapse && collapsedCats.has(c.id);
+      const caret = canCollapse
+        ? `<span class="cat-caret">${collapsed ? "▸" : "▾"}</span>`
+        : "";
+      const rightTxt = collapsed
+        ? `${fmt(total)} · ${its.length} поз.`
+        : `${fmt(total)}${q ? "" : " всего"}`;
+      let inner = `<div class="cat-head" ${canCollapse ? `data-cat-toggle="${c.id}"` : ""}>
+        <span class="grow" style="display:flex;align-items:center;min-width:0">
+          ${caret}<span class="truncate">${esc(c.name)}</span>
+        </span>
+        <span class="cat-stock nowrap">${rightTxt}</span>
+        <button class="icon-btn cat-edit" data-edit-cat="${c.id}" title="Изменить">✎</button>
       </div>`;
-      if (its.length === 0) {
-        inner += `<div class="list-item muted">Нет товаров</div>`;
-      } else {
-        inner += its
-          .map((it) => {
-            const s = itemSummary(store.movementsForItem(it.id), it, opts);
-            return `<div class="list-item" data-item="${it.id}">
+
+      if (!collapsed) {
+        if (its.length === 0) {
+          inner += `<div class="list-item muted">Нет товаров</div>`;
+        } else {
+          inner += its
+            .map((it) => {
+              const s = itemSummary(store.movementsForItem(it.id), it, opts);
+              return `<div class="list-item" data-item="${it.id}">
               <span class="dot ${s.urgency}"></span>
               <div class="grow">
                 <div class="name">${esc(it.name)}</div>
@@ -328,11 +368,12 @@ function renderItemsList() {
               </div>
               <span class="chev">›</span>
             </div>`;
-          })
-          .join("");
-      }
-      if (!q) {
-        inner += `<div class="card-pad"><button class="btn secondary small" data-add-item="${c.id}">＋ Товар в «${esc(c.name)}»</button></div>`;
+            })
+            .join("");
+        }
+        if (!q) {
+          inner += `<div class="card-pad"><button class="btn secondary small" data-add-item="${c.id}">＋ Товар в «${esc(c.name)}»</button></div>`;
+        }
       }
       return `<div class="card">${inner}</div>`;
     })
@@ -1150,6 +1191,14 @@ document.addEventListener("click", (e) => {
     toast("Демо-данные загружены");
     return;
   }
+  if (act === "toggle-all-cats") {
+    const cats = store.categories();
+    if (cats.every((c) => collapsedCats.has(c.id))) collapsedCats.clear();
+    else cats.forEach((c) => collapsedCats.add(c.id));
+    saveCollapsed();
+    render();
+    return;
+  }
   if (act === "go-items") return switchTab("items");
   if (act === "export") return exportData();
   if (act === "import") return $("#import-file").click();
@@ -1171,6 +1220,16 @@ document.addEventListener("click", (e) => {
 
   const editCat = t.closest("[data-edit-cat]")?.dataset.editCat;
   if (editCat) return sheetEditCategory(editCat);
+
+  // Свернуть/развернуть категорию (клик по её шапке, но не по кнопке ✎).
+  const catToggle = t.closest("[data-cat-toggle]")?.dataset.catToggle;
+  if (catToggle) {
+    if (collapsedCats.has(catToggle)) collapsedCats.delete(catToggle);
+    else collapsedCats.add(catToggle);
+    saveCollapsed();
+    render();
+    return;
+  }
 
   const catJump = t.closest("[data-cat-jump]");
   if (catJump) return switchTab("items");

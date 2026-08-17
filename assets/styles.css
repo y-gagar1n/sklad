@@ -382,6 +382,25 @@ button {
   color: var(--text-dim);
   font-weight: 600;
 }
+.cat-head[data-cat-toggle] {
+  cursor: pointer;
+}
+.cat-caret {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-right: 8px;
+  width: 12px;
+  flex: none;
+}
+.cat-edit {
+  width: 36px;
+  height: 36px;
+  font-size: 15px;
+  background: transparent;
+  color: var(--text-dim);
+  flex: none;
+  margin-left: 6px;
+}
 
 /* Поля ввода */
 label.field {
