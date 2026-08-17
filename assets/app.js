@@ -827,8 +827,8 @@ function sheetItemDetail(id) {
     </div>
 
     <div class="card-pad" style="background:var(--surface-2);border-radius:var(--radius-sm);margin-bottom:14px">
-      <div class="row between">
-        <span>Мин. остаток</span><b>${fmt(it.minStock)} ${esc(it.unit)}</b>
+      <div class="row between" data-act="edit-min" data-item="${id}" style="cursor:pointer">
+        <span>Мин. остаток ✎</span><b>${fmt(it.minStock)} ${esc(it.unit)}</b>
       </div>
       <div class="row between" style="margin-top:8px">
         <span>Заказать на месяц</span><b style="color:var(--accent)">＋${fmt(s.order)} ${esc(it.unit)}</b>
@@ -1069,6 +1069,31 @@ function sheetRenameFloor(id) {
   });
 }
 
+// Быстрое редактирование минимального остатка прямо из карточки товара.
+function sheetEditMin(id) {
+  const it = store.getItem(id);
+  if (!it) return;
+  openSheet(`
+    <h3>Мин. остаток: ${esc(it.name)}</h3>
+    <p class="hint" style="margin-top:0">Порог, ниже которого товар нужно заказывать. Влияет на метку срочности и рекомендацию заказа.</p>
+    <label class="field">
+      <span class="lbl">Минимальный остаток (${esc(it.unit)})</span>
+      <input id="f-min" type="number" inputmode="decimal" step="any" min="0" value="${it.minStock}" />
+    </label>
+    <button class="btn block" data-save="min">Сохранить</button>
+  `);
+  focusFirst();
+  $('[data-save="min"]').addEventListener("click", () => {
+    const v = parseNum($("#f-min").value);
+    if (v < 0) return toast("Не может быть отрицательным");
+    store.updateItem(id, { minStock: v });
+    closeSheet();
+    sheetItemDetail(id);
+    render();
+    toast("Мин. остаток обновлён");
+  });
+}
+
 function sheetEditItem(id) {
   const it = store.getItem(id);
   if (!it) return;
@@ -1192,8 +1217,8 @@ document.addEventListener("click", (e) => {
     render();
     return;
   }
-  // Клик по строке товара (не по кнопке) → детали.
-  if (itemRow && !t.closest("button") && itemRow.dataset.item) {
+  // Клик по строке товара (не по кнопке и не по действию) → детали.
+  if (itemRow && !t.closest("button") && !t.closest("[data-act]") && itemRow.dataset.item) {
     sheetItemDetail(itemRow.dataset.item);
     return;
   }
@@ -1228,6 +1253,7 @@ document.addEventListener("click", (e) => {
   }
   if (act === "inventory") return sheetInventory(t.closest("[data-item]").dataset.item);
   if (act === "edit-item") return sheetEditItem(t.closest("[data-item]").dataset.item);
+  if (act === "edit-min") return sheetEditMin(t.closest("[data-item]").dataset.item);
   if (act === "transfer") return sheetTransfer(t.closest("[data-item]").dataset.item);
   if (act === "add-floor") return sheetAddFloor();
 
@@ -1321,13 +1347,15 @@ $("#xlsx-file").addEventListener("change", async (e) => {
     });
     const nCat = parsed.categories.length;
     const nItem = parsed.items.length;
+    const nFloor = (parsed.floors || []).length;
     if (!nItem) {
       alert("В файле не найдено товаров. Проверьте, что это таблица учёта склада.");
       return;
     }
+    const floorTxt = nFloor > 1 ? `, этажей: ${nFloor}` : "";
     if (
       !confirm(
-        `Найдено категорий: ${nCat}, товаров: ${nItem}.\n\nИмпортировать? Текущие данные в приложении будут заменены.`,
+        `Найдено категорий: ${nCat}, товаров: ${nItem}${floorTxt}.\n\nИмпортировать? Текущие данные в приложении будут заменены.`,
       )
     )
       return;

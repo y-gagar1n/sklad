@@ -3,8 +3,16 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { _internals } from "../assets/xlsx-import.js";
 
-const { serialToISO, lastWorkingDays, mapColumns, parseSheet, readSharedStrings } =
-  _internals;
+const {
+  serialToISO,
+  lastWorkingDays,
+  mapColumns,
+  parseSheet,
+  readSharedStrings,
+  floorFromMarker,
+  categoryKey,
+  FLOOR_MARKER,
+} = _internals;
 
 const WD = [1, 2, 3, 4, 5];
 
@@ -63,6 +71,29 @@ test("mapColumns: распознаёт колонки по заголовкам 
   assert.equal(cols.balance, 17); // самый правый «ост …итого»
   assert.equal(cols.consumption, 18);
   assert.equal(cols.consPeriod, "week");
+});
+
+test("floorFromMarker: определяет этаж по разным подписям", () => {
+  assert.equal(floorFromMarker("ВТОРОЙ ЭТАЖ"), 2);
+  assert.equal(floorFromMarker("на 2м этаже на складе"), 2);
+  assert.equal(floorFromMarker("3 этаж"), 3);
+  assert.equal(floorFromMarker("третий этаж"), 3);
+  assert.equal(floorFromMarker("этаж"), 2); // по умолчанию второй
+});
+
+test("FLOOR_MARKER срабатывает на строках-разделителях этажа", () => {
+  assert.ok(FLOOR_MARKER.test("ВТОРОЙ ЭТАЖ"));
+  assert.ok(FLOOR_MARKER.test("на 2м этаже на складе"));
+  assert.ok(!FLOOR_MARKER.test("Молоко")); // обычный товар — не разделитель
+});
+
+test("categoryKey: отбрасывает хвостовую единицу измерения", () => {
+  assert.equal(categoryKey("Мед гр"), categoryKey("Мед"));
+  assert.equal(categoryKey("Нутелла гр"), categoryKey("Нутелла"));
+  assert.equal(categoryKey("Соль"), categoryKey("соль")); // регистр
+  // не трогаем, если хвост — не единица
+  assert.notEqual(categoryKey("Кофе 500 гр./уп"), categoryKey("Кофе"));
+  assert.notEqual(categoryKey("Корица в пачке"), categoryKey("Корица"));
 });
 
 test("mapColumns: месячный лист и «остаток на конец мес-ца»", () => {

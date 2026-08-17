@@ -212,6 +212,30 @@ function mapColumns(headerCells) {
 
 const SKIP_NAME = /^(итого|всего|категор|наименован)/i;
 
+// Единицы измерения, которые в конце названия категории отбрасываем при
+// группировке: «Мед гр» = «Мед», «Нутелла гр» = «Нутелла».
+const UNIT_TOKENS = new Set(["гр", "г", "кг", "мл", "л", "шт"]);
+function categoryKey(name) {
+  const parts = String(name).trim().toLowerCase().split(/\s+/);
+  if (parts.length > 1) {
+    const last = parts[parts.length - 1].replace(/[.,]/g, "");
+    if (UNIT_TOKENS.has(last)) parts.pop();
+  }
+  return parts.join(" ");
+}
+
+// Строка-разделитель этажа внутри листа: «ВТОРОЙ ЭТАЖ», «на 2м этаже на складе».
+// Всё ниже такой строки (до конца листа) относится к указанному этажу.
+const FLOOR_MARKER = /этаж/i;
+const ORDINALS = { перв: 1, втор: 2, трет: 3, четв: 4, пят: 5, шест: 6 };
+function floorFromMarker(text) {
+  const t = String(text).toLowerCase();
+  const digit = t.match(/(\d+)/);
+  if (digit) return Math.max(1, parseInt(digit[1], 10));
+  for (const [stem, n] of Object.entries(ORDINALS)) if (t.includes(stem)) return n;
+  return 2; // «второй этаж» по умолчанию
+}
+
 // arrayBuffer -> { categories:[имена], items:[{category,name,stock,outs:[{date,qty}]}] }
 export async function parseWorkbook(arrayBuffer, opts = {}) {
   const workingDays = opts.workingDays || [1, 2, 3, 4, 5];
@@ -264,13 +288,20 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
 
     const defaultCategory = /хоз/i.test(sheet.name) ? "Хозтовары" : "Без категории";
     let lastCategory = defaultCategory;
+    let currentFloor = 1; // на каждом листе счёт этажей начинается с дефолтного
     const maxRow = Math.max(...Object.keys(rows).map(Number));
 
     for (let r = headerRow + 1; r <= maxRow; r++) {
       const row = rows[r];
       if (!row) continue;
       const name = String(row[cols.name] || "").trim();
-      if (!name || SKIP_NAME.test(name)) continue;
+      if (!name) continue;
+      // Строка-разделитель этажа: переключаем этаж и не считаем её товаром.
+      if (FLOOR_MARKER.test(name)) {
+        currentFloor = floorFromMarker(name);
+        continue;
+      }
+      if (SKIP_NAME.test(name)) continue;
 
       let category = lastCategory;
       if (cols.category) {
@@ -280,8 +311,11 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
           lastCategory = c;
         }
       }
-      const catKey = category.toLowerCase();
-      if (!catDisplay.has(catKey)) catDisplay.set(catKey, category);
+      const catKey = categoryKey(category);
+      const disp = category.trim();
+      const prevDisp = catDisplay.get(catKey);
+      // Имя категории — самое короткое из встреченных вариантов («Мед», не «Мед гр»).
+      if (!prevDisp || disp.length < prevDisp.length) catDisplay.set(catKey, disp);
 
       const stock = num(row[cols.balance]);
       const periodOut = num(row[cols.consumption]);
@@ -289,15 +323,22 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
       let rec = perItem.get(key);
       if (!rec) {
         rec = {
-          category: catDisplay.get(catKey),
+          catKey,
           name,
           stock: 0,
           stockIdx: -1,
           periodOut: 0,
           periodType: "week",
           consIdx: -1,
+          floorNum: 1,
+          floorIdx: -1,
         };
         perItem.set(key, rec);
+      }
+      // Этаж товара — по самому свежему листу, где он встретился (последнее место).
+      if (sheetIdx >= rec.floorIdx) {
+        rec.floorIdx = sheetIdx;
+        rec.floorNum = currentFloor;
       }
       // Остаток — из самого свежего листа, где он указан.
       if (!Number.isNaN(stock) && sheetIdx >= rec.stockIdx) {
@@ -313,11 +354,14 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
     }
   });
 
-  // Строим категории (в порядке появления) и товары с движениями.
+  // Строим категории, список этажей и товары с движениями.
   const categories = [];
+  const floorNums = new Set([1]); // дефолтный этаж есть всегда
   const items = [];
   for (const rec of perItem.values()) {
-    if (!categories.includes(rec.category)) categories.push(rec.category);
+    const category = catDisplay.get(rec.catKey);
+    if (!categories.includes(category)) categories.push(category);
+    floorNums.add(rec.floorNum);
 
     let outs = [];
     if (rec.periodOut > 0) {
@@ -327,10 +371,17 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
       const per = round2(rec.periodOut / days.length);
       outs = days.map((d) => ({ date: d, qty: per }));
     }
-    items.push({ category: rec.category, name: rec.name, stock: rec.stock, outs });
+    items.push({
+      category,
+      name: rec.name,
+      floor: "Этаж " + rec.floorNum,
+      stock: rec.stock,
+      outs,
+    });
   }
+  const floors = [...floorNums].sort((a, b) => a - b).map((n) => "Этаж " + n);
 
-  return { categories, items };
+  return { categories, floors, items };
 }
 
 function textOf(files, name) {
@@ -347,4 +398,7 @@ export const _internals = {
   mapColumns,
   parseSheet,
   readSharedStrings,
+  floorFromMarker,
+  categoryKey,
+  FLOOR_MARKER,
 };

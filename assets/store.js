@@ -338,23 +338,41 @@ export function replaceState(newState) {
 }
 
 // ── Импорт разобранного Excel (заменяет все данные) ───────────────────────
-// parsed: { categories:[имена], items:[{category,name,stock,outs:[{date,qty}]}] }
+// parsed: { categories:[имена], floors:[имена], items:[{category,name,floor,stock,outs}] }
 // Остаток восстанавливаем как приход = остаток + суммарный расход, датированный
 // до первого расхода: stock = Σприход − Σрасход даёт ровно текущий остаток,
-// а движения расхода наполняют средние.
+// а движения расхода наполняют средние. Товар с указанным этажом кладём на
+// соответствующий этаж (по умолчанию — «Этаж 1»).
 export function importFromParsed(parsed, today = todayISO()) {
   state = defaultState();
+
+  // Этажи: дефолтный «Этаж 1» уже есть, остальные добавляем из файла.
+  const def = state.floors[0];
+  const floorId = new Map([[def.name, def.id]]);
+  for (const fname of parsed.floors || []) {
+    if (!floorId.has(fname)) floorId.set(fname, addFloor(fname).id);
+  }
+
   const catId = new Map();
   for (const name of parsed.categories || []) {
     if (!catId.has(name)) catId.set(name, addCategory(name).id);
   }
+
+  const itemId = new Map(); // ключ «категория\0товар» -> id (один товар на все этажи)
   for (const it of parsed.items || []) {
     let cid = catId.get(it.category);
     if (!cid) {
       cid = addCategory(it.category).id;
       catId.set(it.category, cid);
     }
-    const item = addItem(cid, { name: it.name, unit: "шт", minStock: 0 });
+    const ikey = it.category + " " + it.name;
+    let iid = itemId.get(ikey);
+    if (!iid) {
+      iid = addItem(cid, { name: it.name, unit: "шт", minStock: 0 }).id;
+      itemId.set(ikey, iid);
+    }
+
+    const fid = floorId.get(it.floor) || def.id;
     const outs = (it.outs || []).filter((o) => o.qty > 0);
     const totalOut = outs.reduce((s, o) => s + o.qty, 0);
     const openStock = (Number(it.stock) || 0) + totalOut;
@@ -365,18 +383,26 @@ export function importFromParsed(parsed, today = todayISO()) {
       openDate = addDays(earliest, -1);
     }
     if (openStock > 0) {
-      addMovement(item.id, {
+      addMovement(iid, {
         date: openDate,
         type: "in",
         qty: openStock,
         adjust: true,
+        floorId: fid,
         note: "Импорт из Excel",
       });
     }
     for (const o of outs) {
-      addMovement(item.id, { date: o.date, type: "out", qty: o.qty, note: "Импорт из Excel" });
+      addMovement(iid, {
+        date: o.date,
+        type: "out",
+        qty: o.qty,
+        floorId: fid,
+        note: "Импорт из Excel",
+      });
     }
   }
+  state.activeFloorId = def.id; // после импорта активен дефолтный этаж
   persist();
 }
 
