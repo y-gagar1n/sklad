@@ -201,7 +201,10 @@ export function stockForItem(id, floorId = state.activeFloorId) {
 // ── Этажи ────────────────────────────────────────────────────────────────
 
 export function floors() {
-  return state.floors.filter((f) => !f.deleted).sort((a, b) => a.order - b.order);
+  // Сортировка по имени с учётом чисел: «Этаж 2» раньше «Этаж 10».
+  return state.floors
+    .filter((f) => !f.deleted)
+    .sort((a, b) => a.name.localeCompare(b.name, "ru", { numeric: true }));
 }
 
 export function getFloor(id) {

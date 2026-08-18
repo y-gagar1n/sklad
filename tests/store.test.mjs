@@ -162,6 +162,18 @@ test("импорт из Excel: ненулевой остаток на начал
   assert.equal(open.date, "2026-08-09");
 });
 
+test("этажи в списке сортируются по имени с учётом чисел", () => {
+  fresh();
+  store.renameFloor(store.getActiveFloorId(), "Этаж 2");
+  store.addFloor("Этаж 10");
+  store.addFloor("Этаж 1");
+  store.addFloor("Подвал");
+  assert.deepEqual(
+    store.floors().map((f) => f.name),
+    ["Подвал", "Этаж 1", "Этаж 2", "Этаж 10"],
+  );
+});
+
 test("миграция: данные без этажей получают этаж и floorId у движений", () => {
   // Старое состояние без floors/floorId.
   store.replaceState({
