@@ -162,6 +162,34 @@ test("импорт из Excel: ненулевой остаток на начал
   assert.equal(open.date, "2026-08-09");
 });
 
+test("updateMovement: правит количество/дату и меняет остаток", () => {
+  fresh();
+  const c = store.addCategory("Молоко");
+  const it = store.addItem(c.id, { name: "Коровье", unit: "л" });
+  store.addMovement(it.id, { type: "in", qty: 20, date: "2026-08-01" });
+  const out = store.addMovement(it.id, { type: "out", qty: 5, date: "2026-08-02" });
+  const before = out.updatedAt;
+
+  const res = store.updateMovement(out.id, { qty: 8, date: "2026-08-03" });
+  assert.equal(res.qty, 8);
+  assert.equal(res.date, "2026-08-03");
+  assert.ok(res.updatedAt > before); // бампнули метку → уедет по синку
+  assert.equal(store.stockForItem(it.id), 12); // 20 − 8
+});
+
+test("updateMovement: переносы не редактируются (возврат null)", () => {
+  fresh();
+  const c = store.addCategory("Молоко");
+  const it = store.addItem(c.id, { name: "Коровье", unit: "л" });
+  const f1 = store.getActiveFloorId();
+  store.addMovement(it.id, { type: "in", qty: 20, floorId: f1 });
+  const f2 = store.addFloor("Этаж 2");
+  store.transferStock(it.id, f1, f2.id, 8);
+  const tr = store.movementsForItem(it.id, f1).find((m) => m.transfer);
+  assert.equal(store.updateMovement(tr.id, { qty: 100 }), null);
+  assert.equal(store.stockForItem(it.id, f1), 12); // остаток не тронут
+});
+
 test("этажи в списке сортируются по имени с учётом чисел", () => {
   fresh();
   store.renameFloor(store.getActiveFloorId(), "Этаж 2");

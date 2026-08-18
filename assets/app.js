@@ -921,6 +921,7 @@ function sheetItemDetail(id) {
           <div>${fmtDate(m.date)}</div>
           <div class="muted">${m.transfer ? "перенос" : m.adjust ? "инвентаризация" : m.type === "in" ? "приход" : "расход"}${m.note && (m.transfer || !m.adjust) ? " · " + esc(m.note) : ""}</div>
         </div>
+        ${m.transfer ? "" : `<button class="icon-btn" data-edit-mv="${m.id}" title="Изменить" style="width:40px;height:40px;font-size:18px">✎</button>`}
         <button class="icon-btn" data-del-mv="${m.id}" title="Удалить" style="width:40px;height:40px;font-size:18px">🗑️</button>
       </div>`,
             )
@@ -947,6 +948,9 @@ function sheetItemDetail(id) {
       sheetItemDetail(id); // перерисовать лист
       render();
     }),
+  );
+  $$('[data-edit-mv]').forEach((b) =>
+    b.addEventListener("click", () => sheetEditMovement(b.dataset.editMv, id)),
   );
 }
 
@@ -999,6 +1003,45 @@ function sheetMovement(itemId, type) {
     closeSheet();
     render();
     toast(isIn ? "Приход записан" : "Расход записан");
+  });
+}
+
+// Редактирование существующего прихода/расхода: количество и дата.
+function sheetEditMovement(movementId, itemId) {
+  const it = store.getItem(itemId);
+  const m = store.movementsForItem(itemId).find((x) => x.id === movementId);
+  if (!it || !m || m.transfer) return;
+  const isIn = m.type === "in";
+  const kind = m.adjust ? "инвентаризация" : isIn ? "приход" : "расход";
+  openSheet(`
+    <h3>Изменить движение: ${esc(it.name)}</h3>
+    <div class="muted" style="margin-bottom:14px">Тип: ${kind}. Остаток сейчас: ${fmt(store.stockForItem(itemId, m.floorId))} ${esc(it.unit)}</div>
+    <label class="field">
+      <span class="lbl">Количество (${esc(it.unit)})</span>
+      <input id="f-qty" type="number" inputmode="decimal" step="any" min="0" value="${m.qty}" />
+    </label>
+    <label class="field">
+      <span class="lbl">Дата</span>
+      <input id="f-date" type="date" value="${m.date}" max="${todayISO()}" />
+    </label>
+    <button class="btn block" data-save="edit-mv" style="background:${isIn ? "var(--ok)" : "var(--crit)"}">Сохранить</button>
+  `);
+  focusFirst();
+  $('[data-save="edit-mv"]').addEventListener("click", () => {
+    const qty = parseNum($("#f-qty").value);
+    if (qty <= 0) return toast("Введите количество");
+    // Для расхода/инвентаризации-в-минус: не дать остатку уйти в минус.
+    // Остаток без текущего движения = текущий остаток минус его вклад.
+    if (!isIn) {
+      const stockWithout = store.stockForItem(itemId, m.floorId) + m.qty;
+      if (qty > stockWithout) {
+        return toast(`Нельзя списать больше остатка: ${fmt(stockWithout)} ${it.unit}`);
+      }
+    }
+    store.updateMovement(movementId, { qty, date: $("#f-date").value || m.date });
+    sheetItemDetail(itemId);
+    render();
+    toast("Движение изменено");
   });
 }
 

@@ -442,6 +442,21 @@ export function deleteMovement(id) {
   }
 }
 
+// Редактирование движения: меняем дату/количество/заметку и бампаем updatedAt,
+// поэтому правка нормально уезжает по синку (LWW-слияние по updatedAt, как у
+// любой записи). Переносы (transfer) не трогаем — они парные, правка одной
+// половины рассинхронила бы остатки этажей.
+export function updateMovement(id, { date, qty, note } = {}) {
+  const m = state.movements.find((x) => x.id === id && !x.deleted);
+  if (!m || m.transfer) return null;
+  if (date) m.date = date;
+  if (qty !== undefined) m.qty = Math.abs(Number(qty) || 0);
+  if (note !== undefined) m.note = String(note || "");
+  m.updatedAt = now();
+  persist();
+  return m;
+}
+
 // ── Экспорт / импорт (резервная копия и перенос между устройствами) ────────
 
 export function exportJSON() {
