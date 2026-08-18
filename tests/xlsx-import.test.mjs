@@ -11,6 +11,7 @@ const {
   readSharedStrings,
   floorFromMarker,
   categoryKey,
+  isDataSheet,
   FLOOR_MARKER,
 } = _internals;
 
@@ -94,6 +95,20 @@ test("categoryKey: отбрасывает хвостовую единицу из
   // не трогаем, если хвост — не единица
   assert.notEqual(categoryKey("Кофе 500 гр./уп"), categoryKey("Кофе"));
   assert.notEqual(categoryKey("Корица в пачке"), categoryKey("Корица"));
+});
+
+test("isDataSheet: берём только месячные листы, недельные и служебные — нет", () => {
+  // Месячные сводные — берём.
+  assert.ok(isDataSheet("Продукты Август"));
+  assert.ok(isDataSheet("Хозка Август 26"));
+  assert.ok(isDataSheet("Продукты Сентябрь")); // правило переживает смену месяца
+  // Недельные с диапазонами дат — игнорируем.
+  assert.ok(!isDataSheet("Продукты с 20.07 - 24.07"));
+  assert.ok(!isDataSheet("Продукты 03.08-07.08"));
+  assert.ok(!isDataSheet("Хоз-ка 03.08.-07.08."));
+  // Служебные — игнорируем.
+  assert.ok(!isDataSheet("Заказать - инфо"));
+  assert.ok(!isDataSheet("Лист11"));
 });
 
 test("mapColumns: месячный лист и «остаток на конец мес-ца»", () => {
