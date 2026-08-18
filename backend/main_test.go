@@ -258,6 +258,61 @@ func TestSyncRejectsGet(t *testing.T) {
 	}
 }
 
+// ── CORS ─────────────────────────────────────────────────────────────────────
+
+func TestCORS(t *testing.T) {
+	pages := "https://y-gagar1n.github.io"
+	cases := []struct {
+		name       string
+		allowed    map[string]bool
+		method     string
+		origin     string
+		wantStatus int
+		wantACAO   string // ожидаемый Access-Control-Allow-Origin ("" — заголовка нет)
+	}{
+		{"preflight-any", nil, http.MethodOptions, pages, http.StatusNoContent, "*"},
+		{"preflight-allowed", parseOrigins(pages), http.MethodOptions, pages, http.StatusNoContent, pages},
+		{"preflight-denied", parseOrigins(pages), http.MethodOptions, "https://evil.example", http.StatusNoContent, ""},
+		{"actual-any", nil, http.MethodGet, pages, http.StatusOK, "*"},
+		{"actual-allowed", parseOrigins(pages), http.MethodGet, pages, http.StatusOK, pages},
+		{"actual-denied", parseOrigins(pages), http.MethodGet, "https://evil.example", http.StatusOK, ""},
+		{"no-origin", nil, http.MethodGet, "", http.StatusOK, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTestStore(t)
+			h := withCORS(tc.allowed, newMux(s, "secret", ""))
+			req := httptest.NewRequest(tc.method, "/health", nil)
+			if tc.origin != "" {
+				req.Header.Set("Origin", tc.origin)
+			}
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("статус: ждали %d, получили %d", tc.wantStatus, w.Code)
+			}
+			if got := w.Header().Get("Access-Control-Allow-Origin"); got != tc.wantACAO {
+				t.Fatalf("ACAO: ждали %q, получили %q", tc.wantACAO, got)
+			}
+			if tc.method == http.MethodOptions {
+				if h := w.Header().Get("Access-Control-Allow-Headers"); h == "" {
+					t.Fatalf("preflight без Access-Control-Allow-Headers")
+				}
+			}
+		})
+	}
+}
+
+func TestParseOrigins(t *testing.T) {
+	if parseOrigins("") != nil || parseOrigins("*") != nil || parseOrigins(" , * ") != nil {
+		t.Fatalf("пусто/звёздочка должны давать nil (любой origin)")
+	}
+	set := parseOrigins("https://a.example, https://b.example ")
+	if !set["https://a.example"] || !set["https://b.example"] || len(set) != 2 {
+		t.Fatalf("неверный разбор списка: %#v", set)
+	}
+}
+
 // ── персистентность ─────────────────────────────────────────────────────────
 
 func TestPersistence(t *testing.T) {

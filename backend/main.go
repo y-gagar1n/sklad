@@ -2,8 +2,14 @@
 //
 // Один бинарь делает две вещи:
 //   1. Отдаёт статику приложения (index.html, assets/*, icons/*, sw.js, manifest)
-//      с флага -static — тот же origin, что и API, поэтому нет CORS.
+//      с флага -static — если фронт живёт на том же origin.
 //   2. Держит API синхронизации данных между устройствами.
+//
+// Фронт может лежать и на другом origin (например, GitHub Pages
+// https://y-gagar1n.github.io/sklad/) — тогда браузеру нужен CORS. Разрешённые
+// origin'ы задаются флагом -cors-origin (или env SKLAD_CORS_ORIGIN, через
+// запятую); пусто — разрешить любой ("*"). Авторизация всё равно по bearer-токену
+// в заголовке (не cookie), поэтому "*" безопасен: без токена запрос не пройдёт.
 //
 // Протокол: POST /sync
 //   запрос: { "since": <seq>, "categories":[Record], "items":[Record],
@@ -36,6 +42,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -299,6 +306,49 @@ func staticHandler(dir string) http.Handler {
 	})
 }
 
+// parseOrigins разбирает список origin'ов через запятую. Пусто или "*" → nil,
+// что означает «разрешить любой origin».
+func parseOrigins(s string) map[string]bool {
+	set := map[string]bool{}
+	for _, part := range strings.Split(s, ",") {
+		o := strings.TrimSpace(part)
+		if o == "" || o == "*" {
+			continue
+		}
+		set[o] = true
+	}
+	if len(set) == 0 {
+		return nil
+	}
+	return set
+}
+
+// withCORS добавляет CORS-заголовки и отвечает на preflight (OPTIONS). allowed ==
+// nil → разрешаем любой origin ("*"); иначе отражаем Origin, только если он в
+// списке. Preflight обрабатывается до роутинга, поэтому не упирается в bearer-токен
+// (у preflight-запроса заголовка Authorization нет).
+func withCORS(allowed map[string]bool, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if allowed == nil {
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+			} else if allowed[origin] {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Add("Vary", "Origin")
+			}
+		}
+		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+			w.Header().Set("Access-Control-Max-Age", "86400")
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func newMux(store *Store, token, staticDir string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sync", requireToken(token, store.handleSync))
@@ -320,6 +370,7 @@ func main() {
 	acmeCache := flag.String("acme-cache", "/var/lib/sklad-sync/acme", "каталог кэша сертификатов ACME")
 	tlsCert := flag.String("tls-cert", "", "путь к TLS-сертификату (PEM)")
 	tlsKey := flag.String("tls-key", "", "путь к приватному ключу TLS (PEM)")
+	corsOrigin := flag.String("cors-origin", "", "разрешённые CORS origin'ы через запятую (иначе env SKLAD_CORS_ORIGIN; пусто — любой)")
 	flag.Parse()
 
 	token := os.Getenv("SKLAD_SYNC_TOKEN")
@@ -333,6 +384,11 @@ func main() {
 	if domain == "" {
 		domain = os.Getenv("SKLAD_ACME_DOMAIN")
 	}
+	corsRaw := *corsOrigin
+	if corsRaw == "" {
+		corsRaw = os.Getenv("SKLAD_CORS_ORIGIN")
+	}
+	allowedOrigins := parseOrigins(corsRaw)
 
 	absPath, err := filepath.Abs(*dataPath)
 	if err != nil {
@@ -342,7 +398,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	mux := newMux(store, token, *staticDir)
+	handler := withCORS(allowedOrigins, newMux(store, token, *staticDir))
 
 	// 1) ACME/Let's Encrypt — валидный сертификат сам, TLS-ALPN-01 на :443.
 	if domain != "" {
@@ -351,16 +407,16 @@ func main() {
 			HostPolicy: autocert.HostWhitelist(domain),
 			Cache:      autocert.DirCache(*acmeCache),
 		}
-		srv := &http.Server{Addr: ":443", Handler: mux, TLSConfig: m.TLSConfig()}
+		srv := &http.Server{Addr: ":443", Handler: handler, TLSConfig: m.TLSConfig()}
 		log.Printf("sklad-sync: https://%s (Let's Encrypt), данные: %s, статика: %q", domain, absPath, *staticDir)
 		log.Fatal(srv.ListenAndServeTLS("", ""))
 	}
 	// 2) Заданный сертификат.
 	if *tlsCert != "" {
 		log.Printf("sklad-sync слушает https://%s, данные: %s", *addr, absPath)
-		log.Fatal(http.ListenAndServeTLS(*addr, *tlsCert, *tlsKey, mux))
+		log.Fatal(http.ListenAndServeTLS(*addr, *tlsCert, *tlsKey, handler))
 	}
 	// 3) Обычный HTTP — только для localhost-разработки (secure-context на localhost ок).
 	log.Printf("sklad-sync слушает http://%s (без TLS!), данные: %s", *addr, absPath)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	log.Fatal(http.ListenAndServe(*addr, handler))
 }

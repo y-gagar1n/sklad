@@ -1,6 +1,6 @@
 // Service worker — офлайн-режим. Кэшируем оболочку приложения.
 // Данные пользователя тут не хранятся (они в localStorage), только код и стили.
-const CACHE = "sklad-v11";
+const CACHE = "sklad-v12";
 const ASSETS = [
   "./",
   "./index.html",
@@ -38,6 +38,8 @@ self.addEventListener("activate", (e) => {
 self.addEventListener("fetch", (e) => {
   const { request } = e;
   if (request.method !== "GET") return;
+  // Только свой origin: запросы к API синка (другой сервер) не трогаем и не кэшируем.
+  if (new URL(request.url).origin !== self.location.origin) return;
   e.respondWith(
     fetch(request)
       .then((resp) => {
