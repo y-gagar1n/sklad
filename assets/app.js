@@ -1,6 +1,7 @@
 // app.js — интерфейс приложения: навигация, экраны, формы.
 // Логика расчётов — в calc.js, данные — в store.js.
 import * as store from "./store.js";
+import * as sync from "./sync.js";
 import { parseWorkbook } from "./xlsx-import.js";
 import {
   itemSummary,
@@ -730,6 +731,26 @@ function renderSettings() {
       </label>
     </div>
 
+    <h2 class="section-title">Синхронизация между устройствами</h2>
+    <div class="card card-pad">
+      <p class="hint" style="margin-top:0">Общие данные для телефона и ноутбука. Введите один и тот же адрес сервера и токен на всех устройствах.</p>
+      <label class="field">
+        <span class="lbl">Адрес сервера</span>
+        <input id="sync-url" type="url" inputmode="url" autocomplete="off" placeholder="${DEFAULT_SYNC_URL}" value="${esc(sync.getConfig().url || "")}" />
+      </label>
+      <label class="field">
+        <span class="lbl">Токен доступа</span>
+        <input id="sync-token" type="password" autocomplete="off" placeholder="секретный токен" value="${esc(sync.getConfig().token || "")}" />
+      </label>
+      <button class="btn block" data-act="sync-save">Сохранить и проверить</button>
+      <div class="spacer"></div>
+      <button class="btn secondary block" data-act="sync-now">🔄 Синхронизировать сейчас</button>
+      <div id="sync-status" style="margin-top:10px">${syncStatusHtml()}</div>
+      <div class="divider"></div>
+      <p class="hint" style="margin-top:0">Второе устройство (чтобы забрать данные с сервера, стерев локальные):</p>
+      <button class="btn secondary block" data-act="sync-pull">⬇️ Заменить локальные данными с сервера</button>
+    </div>
+
     <h2 class="section-title">Данные</h2>
     <div class="card card-pad">
       <p class="hint" style="margin-top:0">Данные хранятся в этом браузере на устройстве. Делайте резервную копию и переносите на другой телефон через файл.</p>
@@ -1229,6 +1250,44 @@ function exportData() {
   toast("Копия сохранена");
 }
 
+async function saveSyncConfig() {
+  const url = ($("#sync-url").value.trim() || DEFAULT_SYNC_URL);
+  const token = $("#sync-token").value.trim();
+  if (!token) return toast("Введите токен");
+  sync.setConfig({ url, token });
+  toast("Проверяю подключение…");
+  const r = await sync.testConnection(url, token);
+  updateSyncStatus();
+  if (!r.ok) return alert("Не удалось подключиться: " + r.error);
+  const res = await sync.syncNow();
+  updateSyncStatus();
+  if (res.changed) render();
+  toast(res.ok ? "Подключено и синхронизировано" : "Ошибка синхронизации");
+}
+
+async function runSyncNow() {
+  if (!sync.isConfigured()) return toast("Сначала задайте адрес и токен");
+  toast("Синхронизирую…");
+  const r = await sync.syncNow();
+  updateSyncStatus();
+  if (r.changed) render();
+  toast(r.ok ? "Синхронизировано" : "Ошибка: " + (r.error || ""));
+}
+
+async function runPullReplace() {
+  if (!sync.isConfigured()) return toast("Сначала задайте адрес и токен");
+  if (
+    !confirm(
+      "Заменить все данные на этом устройстве данными с сервера? Локальные изменения на этом устройстве будут потеряны.",
+    )
+  )
+    return;
+  const r = await sync.pullReplace();
+  updateSyncStatus();
+  render();
+  toast(r.ok ? "Данные загружены с сервера" : "Ошибка: " + (r.error || ""));
+}
+
 function importData(file) {
   const reader = new FileReader();
   reader.onload = () => {
@@ -1287,6 +1346,9 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (act === "go-items") return switchTab("items");
+  if (act === "sync-save") return saveSyncConfig();
+  if (act === "sync-now") return runSyncNow();
+  if (act === "sync-pull") return runPullReplace();
   if (act === "export") return exportData();
   if (act === "import") return $("#import-file").click();
   if (act === "import-xlsx") return $("#xlsx-file").click();
@@ -1413,9 +1475,67 @@ $("#xlsx-file").addEventListener("change", async (e) => {
   }
 });
 
+// ── Синхронизация: автозапуск и обновление статуса ─────────────────────────
+
+const DEFAULT_SYNC_URL = "https://213-165-212-180.sslip.io";
+let autoSyncTimer = null;
+
+// Дебаунс автосинка после локальных правок.
+function scheduleAutoSync() {
+  if (!sync.isConfigured()) return;
+  clearTimeout(autoSyncTimer);
+  autoSyncTimer = setTimeout(() => {
+    sync.syncNow().then((r) => {
+      if (r && r.changed) render();
+    });
+  }, 1500);
+}
+store.onChange(scheduleAutoSync);
+
+// Обновляем строку статуса синка, если открыт экран настроек.
+sync.onStatus(() => {
+  if (currentTab === "settings") updateSyncStatus();
+});
+
+function updateSyncStatus() {
+  const el = $("#sync-status");
+  if (!el) return;
+  el.innerHTML = syncStatusHtml();
+}
+
+function syncStatusHtml() {
+  if (!sync.isConfigured()) {
+    return `<span class="muted">Синк выключен — задайте адрес и токен.</span>`;
+  }
+  const s = sync.getStatus();
+  const pending = sync.pendingCount();
+  const when = s.lastSyncAt ? new Date(s.lastSyncAt).toLocaleTimeString("ru-RU") : "—";
+  let line = s.syncing
+    ? `<span class="muted">Синхронизирую…</span>`
+    : `<span class="muted">Последний синк: ${when} · не отправлено: ${pending}</span>`;
+  if (s.lastError) {
+    line += `<div class="badge critical" style="margin-top:6px">Ошибка: ${esc(s.lastError)}</div>`;
+  }
+  return line;
+}
+
+// Синк при запуске, возврате в приложение и появлении сети.
+function syncIfConfigured() {
+  if (sync.isConfigured()) {
+    sync.syncNow().then((r) => {
+      if (r && r.changed) render();
+    });
+  }
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") syncIfConfigured();
+});
+window.addEventListener("online", syncIfConfigured);
+
 // ── Старт ────────────────────────────────────────────────────────────────
 
 switchTab("overview");
+syncIfConfigured();
 
 // Регистрация service worker (офлайн-режим). Не критично, если не поддержан.
 if ("serviceWorker" in navigator) {

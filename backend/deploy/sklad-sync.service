@@ -1,0 +1,32 @@
+[Unit]
+Description=Sklad sync server + web app
+After=network.target
+
+[Service]
+Type=simple
+User=sklad-sync
+Group=sklad-sync
+WorkingDirectory=/var/lib/sklad-sync
+# SKLAD_SYNC_TOKEN и SKLAD_ACME_DOMAIN лежат в /etc/sklad-sync/env
+# (mode 0600, owner sklad-sync). Файл создаётся вручную bootstrap-sklad.sh,
+# deploy-sklad.sh его не трогает.
+EnvironmentFile=/etc/sklad-sync/env
+# Домен для авто-сертификата берётся из env SKLAD_ACME_DOMAIN → слушаем :443
+# с валидным Let's Encrypt (TLS-ALPN-01). Статику отдаём из /opt/sklad-sync/public.
+ExecStart=/opt/sklad-sync/sklad-sync \
+    -data /var/lib/sklad-sync/sklad-sync.json \
+    -static /opt/sklad-sync/public \
+    -acme-cache /var/lib/sklad-sync/acme
+Restart=always
+RestartSec=2
+# :443 — привилегированный порт, а пользователь непривилегированный.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/sklad-sync
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,366 @@
+// sklad-sync — сервер синхронизации и раздачи веб-приложения «Склад».
+//
+// Один бинарь делает две вещи:
+//   1. Отдаёт статику приложения (index.html, assets/*, icons/*, sw.js, manifest)
+//      с флага -static — тот же origin, что и API, поэтому нет CORS.
+//   2. Держит API синхронизации данных между устройствами.
+//
+// Протокол: POST /sync
+//   запрос: { "since": <seq>, "categories":[Record], "items":[Record],
+//             "floors":[Record], "movements":[Record], "settings":[Record] }
+//   ответ:  { "seq": <seq>, ...те же коллекции... }
+//
+// Record: { "id": string, "updatedAt": <ms>, "deleted": bool, "data": {...} }.
+// Конфликты — last-write-wins по updatedAt, удаления — тумбстоуны. Клиент хранит
+// seq из ответа и шлёт его как since дальше. POST /wipe тумбстоунит всё.
+//
+// Защита: /sync и /wipe требуют Authorization: Bearer $SKLAD_SYNC_TOKEN (токен из
+// env, обязателен). /health открыт.
+//
+// TLS: если задан -acme-domain (или env SKLAD_ACME_DOMAIN) — сервер сам получает
+// и продлевает валидный сертификат Let's Encrypt (TLS-ALPN-01 на :443), домена
+// покупать не надо (годится 213-165-212-180.sslip.io). Иначе -tls-cert/-tls-key,
+// иначе (для localhost-разработки) — обычный HTTP.
+//
+// ВАЖНО: сервис полностью изолирован от todo-sync — свои пути, порт, данные.
+package main
+
+import (
+	"crypto/subtle"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"log"
+	"mime"
+	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
+	"sync"
+	"time"
+
+	"golang.org/x/crypto/acme/autocert"
+)
+
+// Порядок коллекций фиксирован — по нему ходим в apply/changedSince.
+var collectionNames = []string{"categories", "items", "floors", "movements", "settings"}
+
+type Record struct {
+	ID        string          `json:"id"`
+	UpdatedAt float64         `json:"updatedAt"`
+	Deleted   bool            `json:"deleted"`
+	Data      json.RawMessage `json:"data,omitempty"`
+	Seq       int64           `json:"seq,omitempty"`
+}
+
+type State struct {
+	Seq  int64                         `json:"seq"`
+	Coll map[string]map[string]*Record `json:"collections"`
+}
+
+type Store struct {
+	mu    sync.Mutex
+	path  string
+	state State
+}
+
+func newState() State {
+	st := State{Coll: map[string]map[string]*Record{}}
+	for _, name := range collectionNames {
+		st.Coll[name] = map[string]*Record{}
+	}
+	return st
+}
+
+func NewStore(path string) (*Store, error) {
+	s := &Store{path: path, state: newState()}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return s, nil
+		}
+		return nil, err
+	}
+	if err := json.Unmarshal(raw, &s.state); err != nil {
+		return nil, fmt.Errorf("повреждён файл данных %s: %w", path, err)
+	}
+	if s.state.Coll == nil {
+		s.state.Coll = map[string]map[string]*Record{}
+	}
+	for _, name := range collectionNames {
+		if s.state.Coll[name] == nil {
+			s.state.Coll[name] = map[string]*Record{}
+		}
+	}
+	return s, nil
+}
+
+func (s *Store) save() error {
+	raw, err := json.MarshalIndent(&s.state, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := s.path + ".tmp"
+	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.path)
+}
+
+// apply вливает записи клиента в коллекцию по правилу LWW, возвращает число
+// принятых. Ничья по updatedAt — за инкумбентом.
+func (s *Store) apply(coll map[string]*Record, incoming []Record) int {
+	accepted := 0
+	for i := range incoming {
+		rec := incoming[i]
+		if rec.ID == "" {
+			continue
+		}
+		existing, ok := coll[rec.ID]
+		if ok && rec.UpdatedAt <= existing.UpdatedAt {
+			continue
+		}
+		if rec.Deleted {
+			rec.Data = nil
+		}
+		s.state.Seq++
+		rec.Seq = s.state.Seq
+		coll[rec.ID] = &rec
+		accepted++
+	}
+	return accepted
+}
+
+func changedSince(coll map[string]*Record, since int64) []Record {
+	var out []Record
+	for _, rec := range coll {
+		if rec.Seq > since {
+			out = append(out, *rec)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Seq < out[j].Seq })
+	return out
+}
+
+type syncRequest struct {
+	Since       int64               `json:"since"`
+	Collections map[string][]Record `json:"-"`
+}
+
+// Плоский JSON: {since, categories:[], items:[], ...}. Разбираем вручную, чтобы
+// коллекции лежали на верхнем уровне, а не во вложенном объекте.
+func (r *syncRequest) UnmarshalJSON(b []byte) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	if v, ok := raw["since"]; ok {
+		if err := json.Unmarshal(v, &r.Since); err != nil {
+			return err
+		}
+	}
+	r.Collections = map[string][]Record{}
+	for _, name := range collectionNames {
+		if v, ok := raw[name]; ok {
+			var recs []Record
+			if err := json.Unmarshal(v, &recs); err != nil {
+				return err
+			}
+			r.Collections[name] = recs
+		}
+	}
+	return nil
+}
+
+func writeSyncResponse(w http.ResponseWriter, seq int64, per map[string][]Record) error {
+	out := map[string]any{"seq": seq}
+	for _, name := range collectionNames {
+		recs := per[name]
+		if recs == nil {
+			recs = []Record{}
+		}
+		out[name] = recs
+	}
+	w.Header().Set("Content-Type", "application/json")
+	return json.NewEncoder(w).Encode(out)
+}
+
+func (s *Store) handleSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req syncRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20)).Decode(&req); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Курсор от другой инкарнации сервера (файл пересоздан) — отдаём всё с нуля.
+	if req.Since > s.state.Seq {
+		req.Since = 0
+	}
+
+	accepted := 0
+	for _, name := range collectionNames {
+		accepted += s.apply(s.state.Coll[name], req.Collections[name])
+	}
+	if accepted > 0 {
+		if err := s.save(); err != nil {
+			log.Printf("ошибка записи %s: %v", s.path, err)
+			http.Error(w, "storage error", http.StatusInternalServerError)
+			return
+		}
+	}
+
+	per := map[string][]Record{}
+	for _, name := range collectionNames {
+		per[name] = changedSince(s.state.Coll[name], req.Since)
+	}
+
+	log.Printf("sync %s: since=%d accepted=%d seq=%d", r.RemoteAddr, req.Since, accepted, s.state.Seq)
+	if err := writeSyncResponse(w, s.state.Seq, per); err != nil {
+		log.Printf("ошибка ответа: %v", err)
+	}
+}
+
+// handleWipe тумбстоунит все записи; updatedAt = max(now, existing+1), чтобы
+// тумбстоун побеждал по LWW даже при свежих pending-правках клиента.
+func (s *Store) handleWipe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nowMs := float64(time.Now().UnixMilli())
+	counts := map[string]int{}
+	total := 0
+	for _, name := range collectionNames {
+		coll := s.state.Coll[name]
+		n := 0
+		for id, rec := range coll {
+			ts := nowMs
+			if rec.UpdatedAt+1 > ts {
+				ts = rec.UpdatedAt + 1
+			}
+			s.state.Seq++
+			coll[id] = &Record{ID: rec.ID, UpdatedAt: ts, Deleted: true, Seq: s.state.Seq}
+			n++
+		}
+		counts[name] = n
+		total += n
+	}
+	if total > 0 {
+		if err := s.save(); err != nil {
+			log.Printf("ошибка записи %s: %v", s.path, err)
+			http.Error(w, "storage error", http.StatusInternalServerError)
+			return
+		}
+	}
+	log.Printf("wipe %s: tombstoned=%d seq=%d", r.RemoteAddr, total, s.state.Seq)
+	out := map[string]any{"seq": s.state.Seq}
+	for name, n := range counts {
+		out[name] = n
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// requireToken отсекает запросы без валидного bearer-токена (constant-time).
+func requireToken(token string, next http.HandlerFunc) http.HandlerFunc {
+	expected := []byte("Bearer " + token)
+	return func(w http.ResponseWriter, r *http.Request) {
+		got := []byte(r.Header.Get("Authorization"))
+		if len(got) != len(expected) || subtle.ConstantTimeCompare(got, expected) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sklad-sync"`)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
+}
+
+// staticHandler отдаёт файлы веб-приложения из каталога dir. Заодно чиним MIME
+// для .webmanifest и .js (иначе часть окружений отдаёт octet-stream).
+func staticHandler(dir string) http.Handler {
+	_ = mime.AddExtensionType(".webmanifest", "application/manifest+json")
+	_ = mime.AddExtensionType(".js", "text/javascript")
+	_ = mime.AddExtensionType(".mjs", "text/javascript")
+	fs := http.FileServer(http.Dir(dir))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Service worker и офлайн-первый апп: без агрессивного кэша прокси.
+		w.Header().Set("Cache-Control", "no-cache")
+		fs.ServeHTTP(w, r)
+	})
+}
+
+func newMux(store *Store, token, staticDir string) *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/sync", requireToken(token, store.handleSync))
+	mux.HandleFunc("/wipe", requireToken(token, store.handleWipe))
+	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "ok")
+	})
+	if staticDir != "" {
+		mux.Handle("/", staticHandler(staticDir))
+	}
+	return mux
+}
+
+func main() {
+	addr := flag.String("addr", ":443", "адрес прослушивания")
+	dataPath := flag.String("data", "sklad-sync.json", "путь к файлу данных")
+	staticDir := flag.String("static", "", "каталог со статикой веб-приложения (пусто — не раздавать)")
+	acmeDomain := flag.String("acme-domain", "", "домен для авто-сертификата Let's Encrypt (иначе env SKLAD_ACME_DOMAIN)")
+	acmeCache := flag.String("acme-cache", "/var/lib/sklad-sync/acme", "каталог кэша сертификатов ACME")
+	tlsCert := flag.String("tls-cert", "", "путь к TLS-сертификату (PEM)")
+	tlsKey := flag.String("tls-key", "", "путь к приватному ключу TLS (PEM)")
+	flag.Parse()
+
+	token := os.Getenv("SKLAD_SYNC_TOKEN")
+	if token == "" {
+		log.Fatal("SKLAD_SYNC_TOKEN не задан — сервер отказывается стартовать без авторизации")
+	}
+	if (*tlsCert == "") != (*tlsKey == "") {
+		log.Fatal("--tls-cert и --tls-key нужно задавать вместе")
+	}
+	domain := *acmeDomain
+	if domain == "" {
+		domain = os.Getenv("SKLAD_ACME_DOMAIN")
+	}
+
+	absPath, err := filepath.Abs(*dataPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	store, err := NewStore(absPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	mux := newMux(store, token, *staticDir)
+
+	// 1) ACME/Let's Encrypt — валидный сертификат сам, TLS-ALPN-01 на :443.
+	if domain != "" {
+		m := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(domain),
+			Cache:      autocert.DirCache(*acmeCache),
+		}
+		srv := &http.Server{Addr: ":443", Handler: mux, TLSConfig: m.TLSConfig()}
+		log.Printf("sklad-sync: https://%s (Let's Encrypt), данные: %s, статика: %q", domain, absPath, *staticDir)
+		log.Fatal(srv.ListenAndServeTLS("", ""))
+	}
+	// 2) Заданный сертификат.
+	if *tlsCert != "" {
+		log.Printf("sklad-sync слушает https://%s, данные: %s", *addr, absPath)
+		log.Fatal(http.ListenAndServeTLS(*addr, *tlsCert, *tlsKey, mux))
+	}
+	// 3) Обычный HTTP — только для localhost-разработки (secure-context на localhost ок).
+	log.Printf("sklad-sync слушает http://%s (без TLS!), данные: %s", *addr, absPath)
+	log.Fatal(http.ListenAndServe(*addr, mux))
+}

@@ -1,0 +1,15 @@
+[Unit]
+Description=Sklad sync data snapshot
+After=sklad-sync.service
+
+[Service]
+Type=oneshot
+User=sklad-sync
+Group=sklad-sync
+ExecStart=/opt/sklad-sync/backup.sh
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/var/lib/sklad-sync
+ReadWritePaths=/var/backups/sklad-sync

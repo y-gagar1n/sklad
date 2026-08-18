@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily sklad-sync data snapshot
+
+[Timer]
+OnCalendar=daily
+# VM была выключена в полночь — снимок сделается после ближайшей загрузки.
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

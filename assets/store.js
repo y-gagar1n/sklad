@@ -1,48 +1,84 @@
 // store.js — данные склада и их хранение в браузере (localStorage).
-// Всё локально на устройстве; резервная копия — экспорт/импорт JSON.
+// Рабочее хранилище — локальное; поверх работает фоновый синк (sync.js) с
+// сервером. Для синка у каждой записи есть updatedAt(ms) и флаг deleted
+// (тумбстоун вместо жёсткого удаления), конфликты решаются LWW по updatedAt.
 import { stockOf, todayISO, addDays } from "./calc.js";
 
 const KEY = "sklad-state-v1";
-const VERSION = 1;
+const VERSION = 2;
+export const SETTINGS_ID = "settings";
+
+// Базовая метка для мигрированных записей: заведомо «старая», чтобы любая
+// реальная правка (updatedAt=now) на любом устройстве побеждала по LWW.
+const BASELINE = 1;
 
 function uid() {
   if (globalThis.crypto?.randomUUID) return crypto.randomUUID();
   return "id-" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 }
 
+// Монотонные метки: строго возрастают даже при нескольких правках в одну
+// миллисекунду — иначе LWW не смог бы упорядочить их и последняя правка
+// потерялась бы при синке.
+let lastStamp = 0;
+function now() {
+  const t = Date.now();
+  lastStamp = t > lastStamp ? t : lastStamp + 1;
+  return lastStamp;
+}
+
+function defaultSettings() {
+  return {
+    // Рабочие дни недели: 0=Вс … 6=Сб. По умолчанию Пн–Пт.
+    workingDays: [1, 2, 3, 4, 5],
+    // Считать средние только по рабочим дням.
+    workingDaysOnly: true,
+    // Окно усреднения расхода, дней.
+    windowDays: 30,
+  };
+}
+
 function defaultState() {
   const floorId = uid();
+  const t = now();
   return {
     version: VERSION,
-    settings: {
-      // Рабочие дни недели: 0=Вс … 6=Сб. По умолчанию Пн–Пт.
-      workingDays: [1, 2, 3, 4, 5],
-      // Считать средние только по рабочим дням.
-      workingDaysOnly: true,
-      // Окно усреднения расхода, дней.
-      windowDays: 30,
-    },
+    settings: defaultSettings(),
+    settingsUpdatedAt: t,
     // Этажи: у каждого свой остаток; категории и товары общие для всех этажей.
-    floors: [{ id: floorId, name: "Этаж 1", order: 0 }],
-    activeFloorId: floorId,
+    floors: [{ id: floorId, name: "Этаж 1", order: 0, updatedAt: t, deleted: false }],
+    activeFloorId: floorId, // device-local, не синкается
     categories: [],
     items: [],
     movements: [],
   };
 }
 
-// Гарантируем наличие хотя бы одного этажа, корректный активный этаж и
-// проставленный floorId у всех движений (миграция старых данных без этажей).
+// Описание синкаемых коллекций: какие поля попадают в payload (data).
+const COLLS = {
+  categories: ["name", "order"],
+  items: ["categoryId", "name", "unit", "minStock", "order"],
+  floors: ["name", "order"],
+  movements: ["itemId", "floorId", "date", "type", "qty", "adjust", "transfer", "note"],
+};
+
+// Живые (не удалённые) этажи.
+function liveFloors(st) {
+  return st.floors.filter((f) => !f.deleted);
+}
+
+// Гарантируем: хотя бы один живой этаж, корректный activeFloorId, floorId у
+// движений (миграция старых данных без этажей).
 function ensureFloors(st) {
   if (!Array.isArray(st.floors)) st.floors = [];
-  if (st.floors.length === 0) {
-    st.floors.push({ id: uid(), name: "Этаж 1", order: 0 });
+  if (liveFloors(st).length === 0) {
+    st.floors.push({ id: uid(), name: "Этаж 1", order: 0, updatedAt: now(), deleted: false });
   }
-  const ids = new Set(st.floors.map((f) => f.id));
-  if (!st.activeFloorId || !ids.has(st.activeFloorId)) {
-    st.activeFloorId = st.floors[0].id;
+  const liveIds = new Set(liveFloors(st).map((f) => f.id));
+  if (!st.activeFloorId || !liveIds.has(st.activeFloorId)) {
+    st.activeFloorId = liveFloors(st)[0].id;
   }
-  const def = st.floors[0].id;
+  const def = liveFloors(st)[0].id;
   for (const m of st.movements) if (!m.floorId) m.floorId = def;
   return st;
 }
@@ -61,12 +97,13 @@ function load() {
   }
 }
 
-// Мягкая миграция/защита от кривых данных.
+// Мягкая миграция/защита от кривых данных + бэкфилл полей синка (updatedAt/deleted).
 function normalize(s) {
   const base = defaultState();
   const out = {
     version: VERSION,
     settings: { ...base.settings, ...(s.settings || {}) },
+    settingsUpdatedAt: s.settingsUpdatedAt || BASELINE,
     floors: Array.isArray(s.floors) ? s.floors : [],
     activeFloorId: s.activeFloorId || null,
     categories: Array.isArray(s.categories) ? s.categories : [],
@@ -76,11 +113,35 @@ function normalize(s) {
   if (!Array.isArray(out.settings.workingDays) || !out.settings.workingDays.length) {
     out.settings.workingDays = base.settings.workingDays;
   }
+  // Бэкфилл updatedAt/deleted для записей без полей синка.
+  for (const name of Object.keys(COLLS)) {
+    for (const rec of out[name]) {
+      if (rec.updatedAt === undefined) rec.updatedAt = BASELINE;
+      if (rec.deleted === undefined) rec.deleted = false;
+    }
+  }
   return ensureFloors(out);
 }
 
 function persist() {
   localStorage.setItem(KEY, JSON.stringify(state));
+  notifyChange();
+}
+
+// Подписка на изменения (для автосинка).
+const changeListeners = new Set();
+export function onChange(fn) {
+  changeListeners.add(fn);
+  return () => changeListeners.delete(fn);
+}
+function notifyChange() {
+  for (const fn of changeListeners) {
+    try {
+      fn();
+    } catch (e) {
+      console.warn("change listener error", e);
+    }
+  }
 }
 
 // ── Чтение ────────────────────────────────────────────────────────────────
@@ -103,30 +164,33 @@ export function calcOpts(asOf = todayISO()) {
 }
 
 export function categories() {
-  return [...state.categories].sort((a, b) => a.order - b.order);
+  return state.categories.filter((c) => !c.deleted).sort((a, b) => a.order - b.order);
 }
 
 export function itemsOf(categoryId) {
   return state.items
-    .filter((i) => i.categoryId === categoryId)
+    .filter((i) => !i.deleted && i.categoryId === categoryId)
     .sort((a, b) => a.order - b.order);
 }
 
 export function allItems() {
-  return [...state.items].sort((a, b) => a.order - b.order);
+  return state.items.filter((i) => !i.deleted).sort((a, b) => a.order - b.order);
 }
 
 export function getItem(id) {
-  return state.items.find((i) => i.id === id) || null;
+  return state.items.find((i) => i.id === id && !i.deleted) || null;
 }
 
 export function getCategory(id) {
-  return state.categories.find((c) => c.id === id) || null;
+  return state.categories.find((c) => c.id === id && !c.deleted) || null;
 }
 
 export function movementsForItem(id, floorId = state.activeFloorId) {
   return state.movements
-    .filter((m) => m.itemId === id && (floorId == null || m.floorId === floorId))
+    .filter(
+      (m) =>
+        !m.deleted && m.itemId === id && (floorId == null || m.floorId === floorId),
+    )
     .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
 }
 
@@ -137,11 +201,11 @@ export function stockForItem(id, floorId = state.activeFloorId) {
 // ── Этажи ────────────────────────────────────────────────────────────────
 
 export function floors() {
-  return [...state.floors].sort((a, b) => a.order - b.order);
+  return state.floors.filter((f) => !f.deleted).sort((a, b) => a.order - b.order);
 }
 
 export function getFloor(id) {
-  return state.floors.find((f) => f.id === id) || null;
+  return state.floors.find((f) => f.id === id && !f.deleted) || null;
 }
 
 export function getActiveFloorId() {
@@ -154,13 +218,19 @@ export function getActiveFloor() {
 
 export function setActiveFloor(id) {
   if (getFloor(id)) {
-    state.activeFloorId = id;
+    state.activeFloorId = id; // device-local, не синкается — но persist для памяти
     persist();
   }
 }
 
 export function addFloor(name) {
-  const floor = { id: uid(), name: String(name).trim() || "Этаж", order: state.floors.length };
+  const floor = {
+    id: uid(),
+    name: String(name).trim() || "Этаж",
+    order: state.floors.length,
+    updatedAt: now(),
+    deleted: false,
+  };
   state.floors.push(floor);
   persist();
   return floor;
@@ -170,29 +240,39 @@ export function renameFloor(id, name) {
   const f = getFloor(id);
   if (f) {
     f.name = String(name).trim() || f.name;
+    f.updatedAt = now();
     persist();
   }
 }
 
-// Удаление этажа вместе с его движениями. Последний этаж удалить нельзя.
+// Удаление этажа = тумбстоун этажа и всех его движений. Последний живой этаж
+// удалить нельзя.
 export function deleteFloor(id) {
-  if (state.floors.length <= 1) return false;
-  state.floors = state.floors.filter((f) => f.id !== id);
-  state.movements = state.movements.filter((m) => m.floorId !== id);
-  if (state.activeFloorId === id) state.activeFloorId = state.floors[0].id;
+  if (liveFloors(state).length <= 1) return false;
+  const f = state.floors.find((x) => x.id === id && !x.deleted);
+  if (!f) return false;
+  const t = now();
+  f.deleted = true;
+  f.updatedAt = t;
+  for (const m of state.movements) {
+    if (m.floorId === id && !m.deleted) {
+      m.deleted = true;
+      m.updatedAt = t;
+    }
+  }
+  if (state.activeFloorId === id) state.activeFloorId = liveFloors(state)[0].id;
   persist();
   return true;
 }
 
-// Перенос количества товара с этажа на этаж. Расход/приход-переносы помечены
-// transfer:true и не учитываются в среднем расходе (это перемещение, не расход).
+// Перенос количества товара с этажа на этаж. Помечены transfer:true — в средний
+// расход не идут (это перемещение, не расход), но на остаток влияют.
 export function transferStock(itemId, fromFloorId, toFloorId, qty, date = todayISO()) {
   const amount = Math.abs(Number(qty) || 0);
   if (amount <= 0 || fromFloorId === toFloorId) return false;
   const from = getFloor(fromFloorId);
   const to = getFloor(toFloorId);
   if (!from || !to) return false;
-  // Нельзя перенести больше, чем есть на исходном этаже.
   if (amount > stockForItem(itemId, fromFloorId)) return false;
   const note = `Перенос: ${from.name} → ${to.name}`;
   addMovement(itemId, { date, type: "out", qty: amount, transfer: true, floorId: fromFloorId, note });
@@ -204,6 +284,7 @@ export function transferStock(itemId, fromFloorId, toFloorId, qty, date = todayI
 
 export function updateSettings(patch) {
   state.settings = { ...state.settings, ...patch };
+  state.settingsUpdatedAt = now();
   persist();
 }
 
@@ -214,6 +295,8 @@ export function addCategory(name) {
     id: uid(),
     name: name.trim(),
     order: state.categories.length,
+    updatedAt: now(),
+    deleted: false,
   };
   state.categories.push(cat);
   persist();
@@ -224,17 +307,34 @@ export function renameCategory(id, name) {
   const c = getCategory(id);
   if (c) {
     c.name = name.trim();
+    c.updatedAt = now();
     persist();
   }
 }
 
+// Удаление категории = тумбстоун категории, её товаров и их движений.
 export function deleteCategory(id) {
+  const t = now();
   const itemIds = new Set(
-    state.items.filter((i) => i.categoryId === id).map((i) => i.id),
+    state.items.filter((i) => i.categoryId === id && !i.deleted).map((i) => i.id),
   );
-  state.items = state.items.filter((i) => i.categoryId !== id);
-  state.movements = state.movements.filter((m) => !itemIds.has(m.itemId));
-  state.categories = state.categories.filter((c) => c.id !== id);
+  for (const i of state.items) {
+    if (i.categoryId === id && !i.deleted) {
+      i.deleted = true;
+      i.updatedAt = t;
+    }
+  }
+  for (const m of state.movements) {
+    if (itemIds.has(m.itemId) && !m.deleted) {
+      m.deleted = true;
+      m.updatedAt = t;
+    }
+  }
+  const c = state.categories.find((x) => x.id === id);
+  if (c) {
+    c.deleted = true;
+    c.updatedAt = t;
+  }
   persist();
 }
 
@@ -248,6 +348,8 @@ export function addItem(categoryId, { name, unit = "шт", minStock = 0 }) {
     unit: unit.trim() || "шт",
     minStock: Number(minStock) || 0,
     order: itemsOf(categoryId).length,
+    updatedAt: now(),
+    deleted: false,
   };
   state.items.push(item);
   persist();
@@ -261,12 +363,24 @@ export function updateItem(id, patch) {
   if (patch.unit !== undefined) it.unit = String(patch.unit).trim() || "шт";
   if (patch.minStock !== undefined) it.minStock = Number(patch.minStock) || 0;
   if (patch.categoryId !== undefined) it.categoryId = patch.categoryId;
+  it.updatedAt = now();
   persist();
 }
 
+// Удаление товара = тумбстоун товара и его движений.
 export function deleteItem(id) {
-  state.items = state.items.filter((i) => i.id !== id);
-  state.movements = state.movements.filter((m) => m.itemId !== id);
+  const t = now();
+  const it = state.items.find((x) => x.id === id);
+  if (it) {
+    it.deleted = true;
+    it.updatedAt = t;
+  }
+  for (const m of state.movements) {
+    if (m.itemId === id && !m.deleted) {
+      m.deleted = true;
+      m.updatedAt = t;
+    }
+  }
   persist();
 }
 
@@ -286,6 +400,8 @@ export function addMovement(
     adjust: !!adjust,
     transfer: !!transfer,
     note: String(note || ""),
+    updatedAt: now(),
+    deleted: false,
   };
   state.movements.push(m);
   persist();
@@ -293,8 +409,6 @@ export function addMovement(
 }
 
 // Инвентаризация: выставить фактический остаток на дату.
-// Разницу с текущим складываем как корректировочное движение (adjust:true),
-// поэтому остаток всегда пересчитывается из истории.
 export function setStock(
   itemId,
   targetQty,
@@ -315,9 +429,14 @@ export function setStock(
   });
 }
 
+// Удаление движения = тумбстоун.
 export function deleteMovement(id) {
-  state.movements = state.movements.filter((m) => m.id !== id);
-  persist();
+  const m = state.movements.find((x) => x.id === id);
+  if (m && !m.deleted) {
+    m.deleted = true;
+    m.updatedAt = now();
+    persist();
+  }
 }
 
 // ── Экспорт / импорт (резервная копия и перенос между устройствами) ────────
@@ -337,16 +456,103 @@ export function replaceState(newState) {
   persist();
 }
 
+// ── Синхронизация: запись как {id, updatedAt, deleted, data} ───────────────
+
+function toRecord(obj, fields) {
+  const data = {};
+  for (const f of fields) data[f] = obj[f];
+  return { id: obj.id, updatedAt: obj.updatedAt ?? BASELINE, deleted: !!obj.deleted, data };
+}
+
+// Все локальные записи (включая тумбстоуны) по коллекциям — для отправки/диффа.
+export function exportRecords() {
+  const out = {};
+  for (const [name, fields] of Object.entries(COLLS)) {
+    out[name] = state[name].map((o) => toRecord(o, fields));
+  }
+  out.settings = [
+    {
+      id: SETTINGS_ID,
+      updatedAt: state.settingsUpdatedAt ?? BASELINE,
+      deleted: false,
+      data: { ...state.settings },
+    },
+  ];
+  return out;
+}
+
+function rebuildRecord(rec, fields) {
+  const obj = { id: rec.id, updatedAt: rec.updatedAt, deleted: !!rec.deleted };
+  const data = rec.data || {};
+  for (const f of fields) obj[f] = data[f];
+  return obj;
+}
+
+// LWW-слияние серверных записей в локальный стейт. Возвращает true, если что-то
+// изменилось. Не трогает device-local поля (activeFloorId).
+export function applyServerRecords(per) {
+  let changed = false;
+  for (const [name, fields] of Object.entries(COLLS)) {
+    const arr = state[name];
+    const idx = new Map(arr.map((o, i) => [o.id, i]));
+    for (const rec of per[name] || []) {
+      if (!rec || !rec.id) continue;
+      const i = idx.get(rec.id);
+      if (i === undefined) {
+        arr.push(rebuildRecord(rec, fields));
+        changed = true;
+      } else if (rec.updatedAt > arr[i].updatedAt) {
+        arr[i] = rebuildRecord(rec, fields);
+        changed = true;
+      }
+    }
+  }
+  for (const rec of per.settings || []) {
+    if (rec.id === SETTINGS_ID && rec.updatedAt > (state.settingsUpdatedAt ?? BASELINE)) {
+      state.settings = { ...defaultSettings(), ...(rec.data || {}) };
+      state.settingsUpdatedAt = rec.updatedAt;
+      changed = true;
+    }
+  }
+  if (changed) {
+    ensureFloors(state);
+    persist();
+  }
+  return changed;
+}
+
+// Полностью пересобрать стейт из серверных записей (для вторичного устройства:
+// «заменить локальные данные серверными»). activeFloorId выставляем локально.
+export function replaceFromServerRecords(per) {
+  const fresh = {
+    version: VERSION,
+    settings: defaultSettings(),
+    settingsUpdatedAt: BASELINE,
+    floors: [],
+    categories: [],
+    items: [],
+    movements: [],
+    activeFloorId: null,
+  };
+  for (const [name, fields] of Object.entries(COLLS)) {
+    for (const rec of per[name] || []) {
+      if (rec && rec.id) fresh[name].push(rebuildRecord(rec, fields));
+    }
+  }
+  for (const rec of per.settings || []) {
+    if (rec.id === SETTINGS_ID) {
+      fresh.settings = { ...defaultSettings(), ...(rec.data || {}) };
+      fresh.settingsUpdatedAt = rec.updatedAt;
+    }
+  }
+  state = ensureFloors(fresh);
+  persist();
+}
+
 // ── Импорт разобранного Excel (заменяет все данные) ───────────────────────
-// parsed: { categories:[имена], floors:[имена], items:[{category,name,floor,stock,outs}] }
-// Остаток восстанавливаем как приход = остаток + суммарный расход, датированный
-// до первого расхода: stock = Σприход − Σрасход даёт ровно текущий остаток,
-// а движения расхода наполняют средние. Товар с указанным этажом кладём на
-// соответствующий этаж (по умолчанию — «Этаж 1»).
 export function importFromParsed(parsed, today = todayISO()) {
   state = defaultState();
 
-  // Этажи: дефолтный «Этаж 1» уже есть, остальные добавляем из файла.
   const def = state.floors[0];
   const floorId = new Map([[def.name, def.id]]);
   for (const fname of parsed.floors || []) {
@@ -358,14 +564,14 @@ export function importFromParsed(parsed, today = todayISO()) {
     if (!catId.has(name)) catId.set(name, addCategory(name).id);
   }
 
-  const itemId = new Map(); // ключ «категория\0товар» -> id (один товар на все этажи)
+  const itemId = new Map();
   for (const it of parsed.items || []) {
     let cid = catId.get(it.category);
     if (!cid) {
       cid = addCategory(it.category).id;
       catId.set(it.category, cid);
     }
-    const ikey = it.category + " " + it.name;
+    const ikey = it.category + " " + it.name;
     let iid = itemId.get(ikey);
     if (!iid) {
       iid = addItem(cid, { name: it.name, unit: "шт", minStock: 0 }).id;
@@ -402,15 +608,14 @@ export function importFromParsed(parsed, today = todayISO()) {
       });
     }
   }
-  state.activeFloorId = def.id; // после импорта активен дефолтный этаж
+  state.activeFloorId = def.id;
   persist();
 }
 
-// ── Демо-данные (по кнопке в настройках) ──────────────────────────────────
+// ── Демо-данные ────────────────────────────────────────────────────────────
 
 export function seedDemo() {
-  const s = defaultState();
-  state = s;
+  state = defaultState();
 
   const c1 = addCategory("Молочные продукты");
   const c2 = addCategory("Бакалея");
@@ -422,7 +627,6 @@ export function seedDemo() {
   const sugar = addItem(c2.id, { name: "Сахар", unit: "кг", minStock: 25 });
   const water = addItem(c3.id, { name: "Вода 5 л", unit: "шт", minStock: 40 });
 
-  // Стартовые приходы 20 дней назад и ежедневный расход по рабочим дням.
   const today = todayISO();
   const start = shift(today, -20);
   addMovement(milk.id, { date: start, type: "in", qty: 250 });
@@ -441,7 +645,7 @@ export function seedDemo() {
   for (let d = 19; d >= 1; d--) {
     const date = shift(today, -d);
     const dow = new Date(date).getDay();
-    if (dow === 0 || dow === 6) continue; // выходные пропускаем
+    if (dow === 0 || dow === 6) continue;
     for (const [item, qty] of plan) {
       addMovement(item.id, { date, type: "out", qty });
     }
