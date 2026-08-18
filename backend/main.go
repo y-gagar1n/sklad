@@ -5,6 +5,9 @@
 //      с флага -static — если фронт живёт на том же origin.
 //   2. Держит API синхронизации данных между устройствами.
 //
+// Деплой: автоматически по пушу в backend/** (воркфлоу
+// .github/workflows/deploy-backend.yml) либо вручную ./deploy-sklad.sh.
+//
 // Фронт может лежать и на другом origin (например, GitHub Pages
 // https://y-gagar1n.github.io/sklad/) — тогда браузеру нужен CORS. Разрешённые
 // origin'ы задаются флагом -cors-origin (или env SKLAD_CORS_ORIGIN, через
