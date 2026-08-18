@@ -25,6 +25,11 @@ function esc(s) {
   );
 }
 
+// Единицу «шт» (значение по умолчанию) в интерфейсе не показываем.
+function un(unit) {
+  return unit === "шт" ? "" : unit;
+}
+
 // Число → аккуратная строка (без хвостовых нулей, ру-разделители).
 function fmt(n) {
   if (n === Infinity) return "∞";
@@ -66,10 +71,13 @@ function toast(msg) {
 
 // ── Нижний лист (формы) ───────────────────────────────────────────────────
 
-function openSheet(html) {
+function openSheet(html, { fixed = false } = {}) {
   const sheet = $("#sheet");
   sheet.style.transition = "";
   sheet.style.transform = "";
+  // Фиксированная высота (для листов с растущим списком — поле ввода вверху не
+  // скачет при появлении результатов, растёт скроллимая область, а не сам лист).
+  sheet.classList.toggle("sheet-fixed", fixed);
   $("#sheet-content").innerHTML = html;
   $("#sheet-content").scrollTop = 0;
   $("#sheet-backdrop").classList.add("open");
@@ -278,7 +286,7 @@ function orderRow(it, s) {
     <span class="dot ${s.urgency}"></span>
     <div class="grow">
       <div class="name">${esc(it.name)}</div>
-      <div class="sub">Остаток ${fmt(s.stock)} ${esc(it.unit)} · ${daysTxt}</div>
+      <div class="sub">Остаток ${fmt(s.stock)} ${esc(un(it.unit))} · ${daysTxt}</div>
     </div>
     <div style="text-align:right">
       <div style="font-weight:800">＋${fmt(s.order)}</div>
@@ -304,6 +312,10 @@ function loadCollapsed() {
 function saveCollapsed() {
   localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsedCats]));
 }
+
+// Свёрнутость секций настроек (этажи/категории). По умолчанию свёрнуты;
+// состояние держим только в памяти сессии (при перезагрузке снова свёрнуты).
+const settingsCollapsed = { floors: true, cats: true };
 
 // Кнопка «Свернуть все / Развернуть все» — вне поиска и если есть категории.
 function collapseAllRow() {
@@ -415,11 +427,11 @@ function renderItemsList() {
               <span class="dot ${s.urgency}"></span>
               <div class="grow">
                 <div class="name">${esc(it.name)}</div>
-                <div class="sub">мин. ${fmt(it.minStock)} ${esc(it.unit)}</div>
+                <div class="sub">мин. ${fmt(it.minStock)} ${esc(un(it.unit))}</div>
               </div>
               <div class="nowrap" style="text-align:right">
                 <div style="font-weight:800">${fmt(s.stock)}</div>
-                <div class="sub">${esc(it.unit)}</div>
+                <div class="sub">${esc(un(it.unit))}</div>
               </div>
               <span class="chev">›</span>
             </div>`;
@@ -482,7 +494,7 @@ function renderEntry() {
           return `<div class="card-pad" style="border-bottom:1px solid var(--border)">
             <div class="row between" style="margin-bottom:10px">
               <div class="grow truncate"><b>${esc(it.name)}</b></div>
-              <div class="muted nowrap">${fmt(stock)} ${esc(it.unit)}</div>
+              <div class="muted nowrap">${fmt(stock)} ${esc(un(it.unit))}</div>
             </div>
             <div class="stepper">
               <button class="step-btn out" data-mv="out" data-item="${it.id}">Расход<small>списать со склада</small></button>
@@ -602,19 +614,20 @@ function analyticsOrder() {
       inner += catRows
         .map(({ it, s }) => {
           const daysTxt = s.daysLeft === Infinity ? "—" : `${fmt(s.daysLeft)} дн.`;
-          return `<div class="card-pad" style="border-top:1px solid var(--border)" data-item="${it.id}">
+          return `<div class="card-pad" style="border-top:1px solid var(--border);cursor:pointer" data-item="${it.id}">
             <div class="row between">
               <div class="grow truncate"><b>${esc(it.name)}</b> <span class="badge ${s.urgency}">${URGENCY_LABEL[s.urgency]}</span></div>
+              <span class="chev">›</span>
             </div>
             <div class="row" style="gap:16px;margin-top:8px;flex-wrap:wrap">
-              <span class="muted">Остаток: <b style="color:var(--text)">${fmt(s.stock)} ${esc(it.unit)}</b></span>
+              <span class="muted">Остаток: <b style="color:var(--text)">${fmt(s.stock)} ${esc(un(it.unit))}</b></span>
               <span class="muted">В день: <b style="color:var(--text)">${fmt(s.dailyAvg)}</b></span>
               <span class="muted">Хватит: <b style="color:var(--text)">${daysTxt}</b></span>
             </div>
             <div class="row" style="gap:16px;margin-top:4px;flex-wrap:wrap">
               <span class="muted">Неделя: <b style="color:var(--text)">${fmt(s.weeklyAvg)}</b></span>
               <span class="muted">Месяц: <b style="color:var(--text)">${fmt(s.monthlyAvg)}</b></span>
-              <span class="muted">Заказать: <b style="color:var(--accent)">＋${fmt(s.order)} ${esc(it.unit)}</b></span>
+              <span class="muted">Заказать: <b style="color:var(--accent)">＋${fmt(s.order)} ${esc(un(it.unit))}</b></span>
             </div>
           </div>`;
         })
@@ -663,10 +676,11 @@ function analyticsReport() {
         if (inSum === 0 && outSum === 0) continue;
         cin += inSum;
         cout += outSum;
-        lines.push(`<div class="mv-line">
-          <div class="grow truncate">${esc(it.name)} <span class="muted">${esc(it.unit)}</span></div>
+        lines.push(`<div class="mv-line" data-item="${it.id}" style="cursor:pointer">
+          <div class="grow truncate">${esc(it.name)} <span class="muted">${esc(un(it.unit))}</span></div>
           <span class="mv-qty in">${inStr(inSum)}</span>
           <span class="mv-qty out">${outStr(outSum)}</span>
+          <span class="chev">›</span>
         </div>`);
       }
       if (!lines.length) return "";
@@ -701,9 +715,17 @@ function renderSettings() {
 
   const fl = store.floors();
   const cats = store.categories();
+  const secHead = (key, title, count) =>
+    `<h2 class="section-title collapser" data-settings-toggle="${key}" style="cursor:pointer">
+      <span class="cat-caret">${settingsCollapsed[key] ? "▸" : "▾"}</span>${title}
+      <span class="muted" style="font-weight:400"> · ${count}</span>
+    </h2>`;
   view.innerHTML = `
-    <h2 class="section-title">Этажи</h2>
-    <div class="card">
+    ${secHead("floors", "Этажи", fl.length)}
+    ${
+      settingsCollapsed.floors
+        ? ""
+        : `<div class="card">
       ${fl
         .map(
           (f) => `<div class="list-item">
@@ -715,10 +737,14 @@ function renderSettings() {
         .join("")}
       <div class="card-pad"><button class="btn secondary small" data-act="add-floor">＋ Этаж</button></div>
     </div>
-    <p class="hint">У каждого этажа свой остаток; категории и товары общие. Переключение — на экранах «Обзор», «Ввод», «Товары», «Аналитика».</p>
+    <p class="hint">У каждого этажа свой остаток; категории и товары общие. Переключение — на экранах «Обзор», «Ввод», «Товары», «Аналитика».</p>`
+    }
 
-    <h2 class="section-title">Категории</h2>
-    <div class="card">
+    ${secHead("cats", "Категории", cats.length)}
+    ${
+      settingsCollapsed.cats
+        ? ""
+        : `<div class="card">
       ${
         cats.length
           ? cats
@@ -733,7 +759,8 @@ function renderSettings() {
       }
       <div class="card-pad"><button class="btn secondary small" data-act="add-cat">＋ Категория</button></div>
     </div>
-    <p class="hint">Категории общие для всех этажей. Товары добавляются на экране «Товары».</p>
+    <p class="hint">Категории общие для всех этажей. Товары добавляются на экране «Товары».</p>`
+    }
 
     <h2 class="section-title">Рабочие дни</h2>`;
   view.innerHTML += `
@@ -918,14 +945,17 @@ function sheetCreateItem({ name = "", categoryId = null } = {}) {
 // Глобальное добавление товара: единый поиск — находит существующие товары
 // (открыть карточку) или предлагает создать новый с введённым названием.
 function sheetAddItemGlobal() {
-  openSheet(`
+  openSheet(
+    `
     <h3>Добавить товар</h3>
     <label class="field">
       <span class="lbl">Название товара</span>
       <input id="f-pick" type="search" autocomplete="off" placeholder="Начните вводить название" />
     </label>
     <div id="pick-results"></div>
-  `);
+  `,
+    { fixed: true },
+  );
   focusFirst();
   const inp = $("#f-pick");
   const box = $("#pick-results");
@@ -947,7 +977,7 @@ function sheetAddItemGlobal() {
             return `<div class="list-item" data-open-item="${it.id}">
               <div class="grow">
                 <div class="name">${esc(it.name)}</div>
-                <div class="sub">${esc(cat?.name || "")} · остаток ${fmt(store.stockForItem(it.id))} ${esc(it.unit)}</div>
+                <div class="sub">${esc(cat?.name || "")} · остаток ${fmt(store.stockForItem(it.id))} ${esc(un(it.unit))}</div>
               </div>
               <span class="chev">›</span>
             </div>`;
@@ -977,6 +1007,20 @@ function sheetAddItemGlobal() {
   });
 }
 
+// Строка движения в карточке: дата + 2 колонки (приход | расход) + действия.
+function mvRow2(m) {
+  const note = m.transfer ? "перенос" : m.adjust ? "инвентаризация" : m.note ? esc(m.note) : "";
+  return `<div class="mv-row2">
+    <span class="mv-col-date">${fmtDate(m.date)}${note ? `<span class="muted"> · ${note}</span>` : ""}</span>
+    <span class="mv-col-num mv-qty in">${m.type === "in" ? "＋" + fmt(m.qty) : ""}</span>
+    <span class="mv-col-num mv-qty out">${m.type === "out" ? "−" + fmt(m.qty) : ""}</span>
+    <span class="mv-col-act">
+      ${m.transfer ? "" : `<button class="icon-btn" data-edit-mv="${m.id}" title="Изменить">✎</button>`}
+      <button class="icon-btn" data-del-mv="${m.id}" title="Удалить">🗑️</button>
+    </span>
+  </div>`;
+}
+
 function sheetItemDetail(id) {
   const it = store.getItem(id);
   if (!it) return;
@@ -987,18 +1031,50 @@ function sheetItemDetail(id) {
   const floor = store.getActiveFloor();
 
   const daysTxt = s.daysLeft === Infinity ? "нет расхода" : `${fmt(s.daysLeft)} дн.`;
-  const recent = [...movements].reverse().slice(0, 8);
+
+  // История движений по этажам: 2 колонки (приход | расход) по датам, свежие
+  // сверху. У каждого движения — правка/удаление (кроме переносов).
+  const PER_FLOOR = 60;
+  const floorsWithMv = store
+    .floors()
+    .map((f) => ({ f, mv: store.movementsForItem(id, f.id) }))
+    .filter((x) => x.mv.length);
+  const historyHtml = floorsWithMv.length
+    ? floorsWithMv
+        .map(({ f, mv }) => {
+          const rows = [...mv]
+            .reverse()
+            .slice(0, PER_FLOOR)
+            .map((m) => mvRow2(m))
+            .join("");
+          const more =
+            mv.length > PER_FLOOR
+              ? `<div class="card-pad muted">…и ещё ${mv.length - PER_FLOOR}</div>`
+              : "";
+          return `<div class="card">
+            <div class="cat-head"><span>${esc(f.name)}</span><span class="cat-stock">ост. ${fmt(store.stockForItem(id, f.id))} ${esc(un(it.unit))}</span></div>
+            <div class="mv-head">
+              <span>Дата</span>
+              <span class="mv-col-num" style="color:var(--in)">Приход</span>
+              <span class="mv-col-num" style="color:var(--out)">Расход</span>
+              <span class="mv-col-act"></span>
+            </div>
+            ${rows}${more}
+          </div>`;
+        })
+        .join("")
+    : `<div class="muted">Движений пока нет.</div>`;
 
   openSheet(`
     <h3>${esc(it.name)}</h3>
     <div class="row between" style="margin-bottom:14px">
-      <span class="muted">${esc(cat?.name || "")} · ${esc(it.unit)}</span>
+      <span class="muted">${esc(cat?.name || "")} · ${esc(un(it.unit))}</span>
       <span class="badge ${s.urgency}">${URGENCY_LABEL[s.urgency]}</span>
     </div>
 
     <div class="card-pad" style="background:var(--surface-2);border-radius:var(--radius-sm);text-align:center;margin-bottom:14px">
       <div class="muted">Остаток · этаж «${esc(floor?.name || "")}»</div>
-      <div class="big-num" style="margin-top:6px">${fmt(s.stock)} <span style="font-size:18px">${esc(it.unit)}</span></div>
+      <div class="big-num" style="margin-top:6px">${fmt(s.stock)} <span style="font-size:18px">${esc(un(it.unit))}</span></div>
     </div>
 
     <div class="metric-grid" style="margin-bottom:14px">
@@ -1010,10 +1086,10 @@ function sheetItemDetail(id) {
 
     <div class="card-pad" style="background:var(--surface-2);border-radius:var(--radius-sm);margin-bottom:14px">
       <div class="row between" data-act="edit-min" data-item="${id}" style="cursor:pointer">
-        <span>Мин. остаток ✎</span><b>${fmt(it.minStock)} ${esc(it.unit)}</b>
+        <span>Мин. остаток ✎</span><b>${fmt(it.minStock)} ${esc(un(it.unit))}</b>
       </div>
       <div class="row between" style="margin-top:8px">
-        <span>Заказать на месяц</span><b style="color:var(--accent)">＋${fmt(s.order)} ${esc(it.unit)}</b>
+        <span>Заказать на месяц</span><b style="color:var(--accent)">＋${fmt(s.order)} ${esc(un(it.unit))}</b>
       </div>
     </div>
 
@@ -1025,24 +1101,8 @@ function sheetItemDetail(id) {
     <div class="spacer"></div>
     <button class="btn secondary block" data-act="transfer" data-item="${id}">🔀 Перенести на другой этаж</button>
 
-    <h2 class="section-title">Последние движения</h2>
-    ${
-      recent.length
-        ? recent
-            .map(
-              (m) => `<div class="mv-line">
-        <span class="mv-qty ${m.type}">${m.type === "in" ? "＋" : "−"}${fmt(m.qty)}</span>
-        <div class="grow">
-          <div>${fmtDate(m.date)}</div>
-          <div class="muted">${m.transfer ? "перенос" : m.adjust ? "инвентаризация" : m.type === "in" ? "приход" : "расход"}${m.note && (m.transfer || !m.adjust) ? " · " + esc(m.note) : ""}</div>
-        </div>
-        ${m.transfer ? "" : `<button class="icon-btn" data-edit-mv="${m.id}" title="Изменить" style="width:40px;height:40px;font-size:18px">✎</button>`}
-        <button class="icon-btn" data-del-mv="${m.id}" title="Удалить" style="width:40px;height:40px;font-size:18px">🗑️</button>
-      </div>`,
-            )
-            .join("")
-        : `<div class="muted">Движений пока нет.</div>`
-    }
+    <h2 class="section-title">Движения по этажам</h2>
+    ${historyHtml}
 
     <div class="divider"></div>
     <button class="btn secondary block" data-act="edit-item" data-item="${id}">Изменить товар</button>
@@ -1076,9 +1136,9 @@ function sheetMovement(itemId, type) {
   const presets = [1, 5, 10, 50];
   openSheet(`
     <h3>${isIn ? "Приход" : "Расход"}: ${esc(it.name)}</h3>
-    <div class="muted" style="margin-bottom:14px">Остаток сейчас: ${fmt(store.stockForItem(itemId))} ${esc(it.unit)}</div>
+    <div class="muted" style="margin-bottom:14px">Остаток сейчас: ${fmt(store.stockForItem(itemId))} ${esc(un(it.unit))}</div>
     <label class="field">
-      <span class="lbl">Количество (${esc(it.unit)})</span>
+      <span class="lbl">Количество (${esc(un(it.unit))})</span>
       <input id="f-qty" type="number" inputmode="decimal" step="any" min="0" placeholder="0" />
     </label>
     <div class="row" style="gap:8px;margin-bottom:14px">
@@ -1107,7 +1167,7 @@ function sheetMovement(itemId, type) {
     if (!isIn) {
       const stock = store.stockForItem(itemId);
       if (qty > stock) {
-        return toast(`Нельзя списать больше остатка: ${fmt(stock)} ${it.unit}`);
+        return toast(`Нельзя списать больше остатка: ${fmt(stock)} ${un(it.unit)}`);
       }
     }
     store.addMovement(itemId, {
@@ -1130,9 +1190,9 @@ function sheetEditMovement(movementId, itemId) {
   const kind = m.adjust ? "инвентаризация" : isIn ? "приход" : "расход";
   openSheet(`
     <h3>Изменить движение: ${esc(it.name)}</h3>
-    <div class="muted" style="margin-bottom:14px">Тип: ${kind}. Остаток сейчас: ${fmt(store.stockForItem(itemId, m.floorId))} ${esc(it.unit)}</div>
+    <div class="muted" style="margin-bottom:14px">Тип: ${kind}. Остаток сейчас: ${fmt(store.stockForItem(itemId, m.floorId))} ${esc(un(it.unit))}</div>
     <label class="field">
-      <span class="lbl">Количество (${esc(it.unit)})</span>
+      <span class="lbl">Количество (${esc(un(it.unit))})</span>
       <input id="f-qty" type="number" inputmode="decimal" step="any" min="0" value="${m.qty}" />
     </label>
     <label class="field">
@@ -1150,7 +1210,7 @@ function sheetEditMovement(movementId, itemId) {
     if (!isIn) {
       const stockWithout = store.stockForItem(itemId, m.floorId) + m.qty;
       if (qty > stockWithout) {
-        return toast(`Нельзя списать больше остатка: ${fmt(stockWithout)} ${it.unit}`);
+        return toast(`Нельзя списать больше остатка: ${fmt(stockWithout)} ${un(it.unit)}`);
       }
     }
     store.updateMovement(movementId, { qty, date: $("#f-date").value || m.date });
@@ -1166,9 +1226,9 @@ function sheetInventory(itemId) {
   const cur = store.stockForItem(itemId);
   openSheet(`
     <h3>Инвентаризация: ${esc(it.name)}</h3>
-    <div class="muted" style="margin-bottom:14px">Расчётный остаток: ${fmt(cur)} ${esc(it.unit)}. Введите фактический — разница запишется в историю.</div>
+    <div class="muted" style="margin-bottom:14px">Расчётный остаток: ${fmt(cur)} ${esc(un(it.unit))}. Введите фактический — разница запишется в историю.</div>
     <label class="field">
-      <span class="lbl">Фактический остаток (${esc(it.unit)})</span>
+      <span class="lbl">Фактический остаток (${esc(un(it.unit))})</span>
       <input id="f-qty" type="number" inputmode="decimal" step="any" value="${cur}" />
     </label>
     <label class="field">
@@ -1209,7 +1269,7 @@ function sheetTransfer(itemId) {
   const cur = store.stockForItem(itemId, fromId);
   openSheet(`
     <h3>Перенести: ${esc(it.name)}</h3>
-    <div class="muted" style="margin-bottom:14px">С этажа «${esc(from?.name || "")}» · сейчас ${fmt(cur)} ${esc(it.unit)}</div>
+    <div class="muted" style="margin-bottom:14px">С этажа «${esc(from?.name || "")}» · сейчас ${fmt(cur)} ${esc(un(it.unit))}</div>
     <label class="field">
       <span class="lbl">Куда</span>
       <select id="f-to">
@@ -1217,7 +1277,7 @@ function sheetTransfer(itemId) {
       </select>
     </label>
     <label class="field">
-      <span class="lbl">Сколько перенести (${esc(it.unit)})</span>
+      <span class="lbl">Сколько перенести (${esc(un(it.unit))})</span>
       <input id="f-qty" type="number" inputmode="decimal" step="any" min="0" placeholder="0" />
     </label>
     <div class="row" style="gap:8px;margin-bottom:14px">
@@ -1242,7 +1302,7 @@ function sheetTransfer(itemId) {
     // Нельзя перенести больше, чем есть на исходном этаже.
     const avail = store.stockForItem(itemId, fromId);
     if (qty > avail) {
-      return toast(`Нельзя перенести больше остатка: ${fmt(avail)} ${it.unit}`);
+      return toast(`Нельзя перенести больше остатка: ${fmt(avail)} ${un(it.unit)}`);
     }
     const toId = $("#f-to").value;
     const toName = store.getFloor(toId)?.name || "";
@@ -1302,7 +1362,7 @@ function sheetEditMin(id) {
     <h3>Мин. остаток: ${esc(it.name)}</h3>
     <p class="hint" style="margin-top:0">Порог, ниже которого товар нужно заказывать. Влияет на метку срочности и рекомендацию заказа.</p>
     <label class="field">
-      <span class="lbl">Минимальный остаток (${esc(it.unit)})</span>
+      <span class="lbl">Минимальный остаток (${esc(un(it.unit))})</span>
       <input id="f-min" type="number" inputmode="decimal" step="any" min="0" value="${it.minStock}" />
     </label>
     <button class="btn block" data-save="min">Сохранить</button>
@@ -1338,7 +1398,7 @@ function sheetEditItem(id) {
     <div class="row" style="gap:12px">
       <label class="field grow">
         <span class="lbl">Единица</span>
-        <input id="f-unit" value="${esc(it.unit)}" />
+        <input id="f-unit" value="${esc(un(it.unit))}" />
       </label>
       <label class="field grow">
         <span class="lbl">Мин. остаток</span>
@@ -1555,6 +1615,13 @@ $("#view-settings").addEventListener("change", (e) => {
   }
 });
 $("#view-settings").addEventListener("click", (e) => {
+  const stg = e.target.closest("[data-settings-toggle]");
+  if (stg) {
+    const k = stg.dataset.settingsToggle;
+    settingsCollapsed[k] = !settingsCollapsed[k];
+    render();
+    return;
+  }
   const fe = e.target.closest("[data-floor-edit]");
   if (fe) return sheetRenameFloor(fe.dataset.floorEdit);
   const fd = e.target.closest("[data-floor-del]");

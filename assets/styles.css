@@ -521,6 +521,15 @@ select:focus {
   -webkit-overflow-scrolling: touch;
   padding: 0 20px calc(24px + var(--safe-bottom));
 }
+/* Лист фиксированной высоты: верх (поле ввода) не двигается при появлении
+   результатов — растёт скроллимая область #sheet-content, а не сам лист. */
+.sheet.sheet-fixed {
+  height: 80vh;
+}
+.sheet.sheet-fixed #sheet-content {
+  flex: 1 1 auto;
+  min-height: 0;
+}
 @keyframes slideup {
   from {
     transform: translateY(20px);
@@ -602,6 +611,45 @@ select:focus {
 .mv-qty.out {
   color: var(--out);
   font-weight: 700;
+}
+
+/* История движений в карточке: дата | приход | расход | действия. */
+.mv-head,
+.mv-row2 {
+  display: grid;
+  grid-template-columns: 1fr 60px 60px auto;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+}
+.mv-head {
+  font-size: 12px;
+  padding-bottom: 4px;
+  color: var(--muted);
+}
+.mv-row2 {
+  border-top: 1px solid var(--border);
+  font-size: 15px;
+}
+.mv-col-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.mv-col-date {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mv-col-act {
+  display: flex;
+  gap: 2px;
+  justify-content: flex-end;
+}
+.mv-col-act .icon-btn {
+  width: 34px;
+  height: 34px;
+  font-size: 15px;
 }
 
 /* Поиск */
