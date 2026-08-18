@@ -327,7 +327,7 @@ function renderItems() {
         placeholder="Поиск товара или категории" value="${esc(itemSearch)}" />
       <button class="icon-btn search-clear" id="search-clear" ${itemSearch ? "" : "hidden"} title="Очистить">✕</button>
     </div>
-    <button class="btn block" data-act="add-cat">＋ Категория</button>
+    <button class="btn block" data-act="add-item-global">＋ Товар</button>
     ${collapseAllRow()}
     <div id="items-list"></div>`;
 
@@ -359,7 +359,7 @@ function renderItemsList() {
     list.innerHTML = emptyStateInline(
       "🗂️",
       "Нет категорий",
-      "Начните с категории, например «Молочные продукты».",
+      "Категории создаются на экране «Ещё» → «Категории».",
     );
     return;
   }
@@ -371,10 +371,19 @@ function renderItemsList() {
   const html = cats
     .map((c) => {
       const catMatch = !q || c.name.toLowerCase().includes(q);
-      let its = store.itemsOf(c.id);
-      if (q && !catMatch) {
-        its = its.filter((it) => it.name.toLowerCase().includes(q));
-        if (its.length === 0) return ""; // категория не подходит и товаров нет
+      let its;
+      if (q) {
+        // Поиск: показываем совпадения, включая товары с нулевым остатком
+        // (чтобы к ним можно было добавить приход).
+        its = store.itemsOf(c.id);
+        if (!catMatch) {
+          its = its.filter((it) => it.name.toLowerCase().includes(q));
+          if (its.length === 0) return ""; // категория не подходит и товаров нет
+        }
+      } else {
+        // Без поиска: прячем товары с нулевым остатком и пустые категории.
+        its = store.itemsInStockOf(c.id);
+        if (its.length === 0) return "";
       }
       shown++;
       const total = its.reduce((sum, it) => sum + store.stockForItem(it.id), 0);
@@ -393,7 +402,6 @@ function renderItemsList() {
         </span>
         <span class="cat-stock nowrap">${rightTxt}</span>
         <button class="icon-btn cat-edit" data-add-item="${c.id}" title="Добавить товар">＋</button>
-        <button class="icon-btn cat-edit" data-edit-cat="${c.id}" title="Переименовать">✎</button>
       </div>`;
 
       if (!collapsed) {
@@ -424,8 +432,14 @@ function renderItemsList() {
     .join("");
 
   list.innerHTML =
-    q && shown === 0
-      ? emptyStateInline("🔍", "Ничего не найдено", `По запросу «${esc(itemSearch.trim())}» ничего нет.`)
+    shown === 0
+      ? q
+        ? emptyStateInline("🔍", "Ничего не найдено", `По запросу «${esc(itemSearch.trim())}» ничего нет.`)
+        : emptyStateInline(
+            "📦",
+            "Нет товаров в наличии",
+            "Показаны только товары с остатком. Пустые ищите через поиск.",
+          )
       : html;
 }
 
@@ -686,6 +700,7 @@ function renderSettings() {
   const order = [1, 2, 3, 4, 5, 6, 0]; // Пн..Вс
 
   const fl = store.floors();
+  const cats = store.categories();
   view.innerHTML = `
     <h2 class="section-title">Этажи</h2>
     <div class="card">
@@ -701,6 +716,24 @@ function renderSettings() {
       <div class="card-pad"><button class="btn secondary small" data-act="add-floor">＋ Этаж</button></div>
     </div>
     <p class="hint">У каждого этажа свой остаток; категории и товары общие. Переключение — на экранах «Обзор», «Ввод», «Товары», «Аналитика».</p>
+
+    <h2 class="section-title">Категории</h2>
+    <div class="card">
+      ${
+        cats.length
+          ? cats
+              .map(
+                (c) => `<div class="list-item">
+        <div class="grow"><div class="name">${esc(c.name)}</div></div>
+        <button class="icon-btn" data-edit-cat="${c.id}" title="Переименовать или удалить" style="width:40px;height:40px;font-size:16px">✎</button>
+      </div>`,
+              )
+              .join("")
+          : `<div class="list-item muted">Пока нет категорий</div>`
+      }
+      <div class="card-pad"><button class="btn secondary small" data-act="add-cat">＋ Категория</button></div>
+    </div>
+    <p class="hint">Категории общие для всех этажей. Товары добавляются на экране «Товары».</p>
 
     <h2 class="section-title">Рабочие дни</h2>`;
   view.innerHTML += `
@@ -822,15 +855,34 @@ function sheetEditCategory(id) {
   });
 }
 
-function sheetAddItem(categoryId) {
-  const c = store.getCategory(categoryId);
+// Создание товара. categoryId задан — категория фиксирована (кнопка «+» у
+// категории); иначе показываем выпадающий список категорий. Имя можно
+// предзаполнить (из глобального пикера). После создания сразу открываем
+// карточку — у нового товара остаток 0, и в списке он скрыт, а на карточке
+// можно тут же внести приход.
+function sheetCreateItem({ name = "", categoryId = null } = {}) {
+  const cats = store.categories();
+  if (cats.length === 0) {
+    return toast("Сначала создайте категорию в «Ещё» → «Категории»");
+  }
+  const fixed = categoryId ? store.getCategory(categoryId) : null;
   openSheet(`
     <h3>Новый товар</h3>
-    <div class="muted" style="margin-bottom:14px">в категории «${esc(c?.name || "")}»</div>
+    ${fixed ? `<div class="muted" style="margin-bottom:14px">в категории «${esc(fixed.name)}»</div>` : ""}
     <label class="field">
       <span class="lbl">Название</span>
-      <input id="f-name" placeholder="Напр. Молоко" />
+      <input id="f-name" placeholder="Напр. Молоко" value="${esc(name)}" />
     </label>
+    ${
+      fixed
+        ? ""
+        : `<label class="field">
+      <span class="lbl">Категория</span>
+      <select id="f-cat">
+        ${cats.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join("")}
+      </select>
+    </label>`
+    }
     <div class="row" style="gap:12px">
       <label class="field grow">
         <span class="lbl">Единица</span>
@@ -846,19 +898,82 @@ function sheetAddItem(categoryId) {
   `);
   focusFirst();
   $('[data-save="item"]').addEventListener("click", () => {
-    const name = $("#f-name").value.trim();
-    if (!name) return toast("Введите название");
-    store.addItem(categoryId, {
-      name,
+    const nm = $("#f-name").value.trim();
+    if (!nm) return toast("Введите название");
+    const cid = fixed ? categoryId : $("#f-cat").value;
+    const it = store.addItem(cid, {
+      name: nm,
       unit: $("#f-unit").value.trim() || "шт",
       minStock: parseNum($("#f-min").value),
     });
-    // Разворачиваем категорию, чтобы новый товар был виден.
-    collapsedCats.delete(categoryId);
+    collapsedCats.delete(cid);
     saveCollapsed();
     closeSheet();
     render();
-    toast("Товар добавлен");
+    sheetItemDetail(it.id); // сразу открываем карточку — внести приход
+    toast("Товар добавлен — внесите приход");
+  });
+}
+
+// Глобальное добавление товара: единый поиск — находит существующие товары
+// (открыть карточку) или предлагает создать новый с введённым названием.
+function sheetAddItemGlobal() {
+  openSheet(`
+    <h3>Добавить товар</h3>
+    <label class="field">
+      <span class="lbl">Название товара</span>
+      <input id="f-pick" type="search" autocomplete="off" placeholder="Начните вводить название" />
+    </label>
+    <div id="pick-results"></div>
+  `);
+  focusFirst();
+  const inp = $("#f-pick");
+  const box = $("#pick-results");
+
+  const renderResults = () => {
+    const raw = inp.value.trim();
+    const q = raw.toLowerCase();
+    const matches = q
+      ? store.allItems().filter((it) => it.name.toLowerCase().includes(q))
+      : [];
+    let html = "";
+    if (matches.length) {
+      html +=
+        `<h2 class="section-title">Уже есть</h2><div class="card">` +
+        matches
+          .slice(0, 20)
+          .map((it) => {
+            const cat = store.getCategory(it.categoryId);
+            return `<div class="list-item" data-open-item="${it.id}">
+              <div class="grow">
+                <div class="name">${esc(it.name)}</div>
+                <div class="sub">${esc(cat?.name || "")} · остаток ${fmt(store.stockForItem(it.id))} ${esc(it.unit)}</div>
+              </div>
+              <span class="chev">›</span>
+            </div>`;
+          })
+          .join("") +
+        `</div>`;
+    }
+    if (raw) {
+      html += `<button class="btn block" data-create-item style="margin-top:12px">＋ Создать «${esc(raw)}»</button>`;
+    } else {
+      html += `<p class="hint">Найдите существующий товар, чтобы открыть его, либо введите новое название для создания.</p>`;
+    }
+    box.innerHTML = html;
+  };
+  renderResults();
+  inp.addEventListener("input", renderResults);
+  box.addEventListener("click", (e) => {
+    const open = e.target.closest("[data-open-item]");
+    if (open) {
+      closeSheet();
+      sheetItemDetail(open.dataset.openItem);
+      return;
+    }
+    if (e.target.closest("[data-create-item]")) {
+      sheetCreateItem({ name: inp.value.trim() });
+    }
   });
 }
 
@@ -1373,6 +1488,7 @@ document.addEventListener("click", (e) => {
 
   const act = t.closest("[data-act]")?.dataset.act;
   if (act === "add-cat") return sheetAddCategory();
+  if (act === "add-item-global") return sheetAddItemGlobal();
   if (act === "seed") {
     if (store.allItems().length && !confirm("Заменить текущие данные демо-набором?")) return;
     store.seedDemo();
@@ -1409,7 +1525,7 @@ document.addEventListener("click", (e) => {
   if (act === "add-floor") return sheetAddFloor();
 
   const addItemCat = t.closest("[data-add-item]")?.dataset.addItem;
-  if (addItemCat) return sheetAddItem(addItemCat);
+  if (addItemCat) return sheetCreateItem({ categoryId: addItemCat });
 
   const editCat = t.closest("[data-edit-cat]")?.dataset.editCat;
   if (editCat) return sheetEditCategory(editCat);
