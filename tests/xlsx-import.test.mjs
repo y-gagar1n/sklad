@@ -5,8 +5,8 @@ import { _internals } from "../assets/xlsx-import.js";
 
 const {
   serialToISO,
-  lastWorkingDays,
   mapColumns,
+  dailyColumns,
   parseSheet,
   readSharedStrings,
   floorFromMarker,
@@ -15,26 +15,34 @@ const {
   FLOOR_MARKER,
 } = _internals;
 
-const WD = [1, 2, 3, 4, 5];
-
 test("serialToISO: Excel-сериал → дата", () => {
   assert.equal(serialToISO(46223), "2026-07-20"); // из реального файла: «с 20.07»
   assert.equal(serialToISO(25569), "1970-01-01"); // эпоха
+  assert.equal(serialToISO(46237), "2026-08-03"); // первый день августовской сводки
 });
 
-test("lastWorkingDays: последние 5 рабочих дней до вс 16.08", () => {
-  // 16.08.2026 — воскресенье, 15.08 — суббота → берём Пн–Пт 10–14.08.
-  assert.deepEqual(lastWorkingDays("2026-08-16", 5, WD), [
-    "2026-08-10",
-    "2026-08-11",
-    "2026-08-12",
-    "2026-08-13",
-    "2026-08-14",
+test("dailyColumns: пары приход/расход с датой из строки над шапкой", () => {
+  // Строка дат (Excel-сериалы) и шапка «Приход»/«Расход» + месячные итоги.
+  const dateCells = { 3: "46237", 4: "46237", 5: "46238", 6: "46238", 45: "46266" };
+  const headerCells = {
+    3: "Приход ",
+    4: "Расход",
+    5: "приход ",
+    6: "расход",
+    45: "Итого остаток", // итоговые колонки не считаем дневными
+    46: "Итого расход за месяц",
+  };
+  const cols = dailyColumns(headerCells, dateCells);
+  assert.deepEqual(cols, [
+    { idx: 3, type: "in", date: "2026-08-03" },
+    { idx: 4, type: "out", date: "2026-08-03" },
+    { idx: 5, type: "in", date: "2026-08-04" },
+    { idx: 6, type: "out", date: "2026-08-04" },
   ]);
 });
 
-test("lastWorkingDays: одна дата, если count=1 и день рабочий", () => {
-  assert.deepEqual(lastWorkingDays("2026-08-14", 1, WD), ["2026-08-14"]);
+test("dailyColumns: без строки дат — ничего не берём", () => {
+  assert.deepEqual(dailyColumns({ 3: "Приход" }, null), []);
 });
 
 test("readSharedStrings: собирает строки, включая rich-text", () => {

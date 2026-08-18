@@ -2,7 +2,7 @@
 // Рабочее хранилище — локальное; поверх работает фоновый синк (sync.js) с
 // сервером. Для синка у каждой записи есть updatedAt(ms) и флаг deleted
 // (тумбстоун вместо жёсткого удаления), конфликты решаются LWW по updatedAt.
-import { stockOf, todayISO, addDays } from "./calc.js";
+import { stockOf, todayISO, addDays, round2 } from "./calc.js";
 
 const KEY = "sklad-state-v1";
 const VERSION = 2;
@@ -579,30 +579,36 @@ export function importFromParsed(parsed, today = todayISO()) {
     }
 
     const fid = floorId.get(it.floor) || def.id;
-    const outs = (it.outs || []).filter((o) => o.qty > 0);
-    const totalOut = outs.reduce((s, o) => s + o.qty, 0);
-    const openStock = (Number(it.stock) || 0) + totalOut;
+    // Реальные движения из Excel — переносим как есть, с их датами.
+    const moves = (it.moves || []).filter((m) => m.qty > 0);
+    const sumIn = moves.reduce((s, m) => (m.type === "in" ? s + m.qty : s), 0);
+    const sumOut = moves.reduce((s, m) => (m.type === "out" ? s + m.qty : s), 0);
+    // Остаток на начало периода досчитываем так, чтобы после всех движений
+    // текущий остаток совпал с «Итого остаток» из таблицы:
+    //   начало = остаток − Σприход + Σрасход.
+    const opening = round2((Number(it.stock) || 0) - sumIn + sumOut);
 
     let openDate = today;
-    if (outs.length) {
-      const earliest = outs.reduce((a, o) => (o.date < a ? o.date : a), outs[0].date);
+    if (moves.length) {
+      const earliest = moves.reduce((a, m) => (m.date < a ? m.date : a), moves[0].date);
       openDate = addDays(earliest, -1);
     }
-    if (openStock > 0) {
+    // Начальный остаток — одной инвентаризационной записью (в плюс или в минус).
+    if (opening !== 0) {
       addMovement(iid, {
         date: openDate,
-        type: "in",
-        qty: openStock,
+        type: opening > 0 ? "in" : "out",
+        qty: Math.abs(opening),
         adjust: true,
         floorId: fid,
-        note: "Импорт из Excel",
+        note: "Импорт: остаток на начало",
       });
     }
-    for (const o of outs) {
+    for (const m of moves) {
       addMovement(iid, {
-        date: o.date,
-        type: "out",
-        qty: o.qty,
+        date: m.date,
+        type: m.type,
+        qty: m.qty,
         floorId: fid,
         note: "Импорт из Excel",
       });

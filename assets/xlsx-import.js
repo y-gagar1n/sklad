@@ -1,20 +1,20 @@
 // xlsx-import.js — разбор Excel-файла учёта склада без сторонних библиотек.
 //
-// Читает .xlsx (это ZIP из XML), достаёт из каждого недельного/месячного листа
-// надёжные колонки и превращает их в категории, товары и текущий остаток.
+// Читает .xlsx (это ZIP из XML), достаёт из месячных сводных листов категории,
+// товары, текущий остаток и реальные дневные движения (приход/расход с датами).
 //
 // Что берём (по заголовкам, не по буквам столбцов — раскладка на листах разная):
-//   «Категория»            -> категория (у листов «Хоз-ка» её нет -> «Хозтовары»);
-//   «наименование»         -> товар;
-//   «ост итого» / «Остаток на конец мес-ца» -> текущий остаток;
-//   «Итого расход за неделю» / «…за месяц»   -> расход за период (для среднего).
+//   «Категория»     -> категория (у листов «Хоз-ка» её нет -> «Хозтовары»);
+//   «наименование»  -> товар;
+//   «Итого остаток» -> текущий остаток (из него выводим остаток на начало месяца);
+//   дневные пары «Приход»/«Расход» -> движения; дата дня — Excel-сериал в строке
+//   над шапкой, та же колонка.
 //
-// Ежедневные «Приход/Расход» НЕ берём — в исходной таблице они заполнены
-// непоследовательно (значения путаются между колонками). Берём остаток и расход
-// только с месячных сводных листов (в названии есть месяц, напр. «Продукты
-// Август», «Хозка Август 26»); недельные листы с диапазонами дат
+// Берём данные только с месячных сводных листов (в названии есть месяц, напр.
+// «Продукты Август», «Хозка Август 26»); недельные листы с диапазонами дат
 // («Продукты 03.08-07.08») игнорируем — их итоги ненадёжны и расходятся между
-// собой, из-за чего свежесть по порядку листа давала осечки.
+// собой. Движения переносим как есть, с их датами; недостающий остаток на начало
+// месяца досчитывает store.importFromParsed по формуле «остаток − Σприход + Σрасход».
 
 // ── Распаковка ZIP (только нужные записи) ─────────────────────────────────
 
@@ -141,27 +141,6 @@ function serialToISO(serial) {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-function addDaysISO(iso, n) {
-  const d = new Date(iso + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-}
-
-function weekdayUTC(iso) {
-  return new Date(iso + "T00:00:00Z").getUTCDay(); // 0=Вс … 6=Сб
-}
-
-// Последние N рабочих дней по дату asOf включительно (сегодня и назад).
-function lastWorkingDays(asOfISO, count, workingDays) {
-  const days = [];
-  let cur = asOfISO;
-  for (let i = 0; i < 400 && days.length < count; i++) {
-    if (workingDays.includes(weekdayUTC(cur))) days.unshift(cur);
-    cur = addDaysISO(cur, -1);
-  }
-  return days;
-}
-
 // ── Разбор книги целиком ──────────────────────────────────────────────────
 
 const num = (v) => {
@@ -216,6 +195,29 @@ function mapColumns(headerCells) {
   return { category, name, balance, consumption, consPeriod };
 }
 
+// Дневные колонки движений: пары «Приход»/«Расход» по дням месяца. Дата дня
+// лежит в строке над шапкой (dateCells), в той же колонке — Excel-сериал.
+// «Итого приход/расход/остаток» — это месячные итоги, их сюда не берём.
+const DAY_IN = /^приход/;
+const DAY_OUT = /^расход/;
+function dailyColumns(headerCells, dateCells) {
+  const cols = [];
+  if (!dateCells) return cols;
+  for (const [idxStr, raw] of Object.entries(headerCells)) {
+    const h = norm(raw);
+    if (h.includes("итого")) continue;
+    let type = null;
+    if (DAY_IN.test(h)) type = "in";
+    else if (DAY_OUT.test(h)) type = "out";
+    if (!type) continue;
+    const idx = +idxStr;
+    const serial = num(dateCells[idx]);
+    if (Number.isNaN(serial)) continue;
+    cols.push({ idx, type, date: serialToISO(serial) });
+  }
+  return cols;
+}
+
 const SKIP_NAME = /^(итого|всего|категор|наименован)/i;
 
 // Единицы измерения, которые в конце названия категории отбрасываем при
@@ -242,9 +244,9 @@ function floorFromMarker(text) {
   return 2; // «второй этаж» по умолчанию
 }
 
-// arrayBuffer -> { categories:[имена], items:[{category,name,stock,outs:[{date,qty}]}] }
+// arrayBuffer -> { categories, floors, items:[{category,name,floor,stock,
+//   moves:[{date,type:'in'|'out',qty}]}] }
 export async function parseWorkbook(arrayBuffer, opts = {}) {
-  const workingDays = opts.workingDays || [1, 2, 3, 4, 5];
   if (typeof DecompressionStream === "undefined") {
     throw new Error(
       "Браузер не поддерживает распаковку .xlsx. Обновите браузер (iOS 16.4+/свежий Chrome).",
@@ -275,11 +277,10 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
     sheets.push({ name, path });
   }
 
-  // По каждому товару берём остаток и расход из самого свежего месячного листа,
-  // где они есть (свежесть = порядок листа в книге). Продукты и хозтовары лежат
-  // на разных месячных листах и не пересекаются, так что слияние тривиально.
-  // Категории объединяем без учёта регистра и пробелов («Соль» = «соль»).
-  const today = opts.today || new Date().toISOString().slice(0, 10);
+  // По каждому товару берём остаток и дневные движения из самого свежего
+  // месячного листа, где он есть (свежесть = порядок листа в книге). Продукты и
+  // хозтовары лежат на разных месячных листах и не пересекаются, так что слияние
+  // тривиально. Категории объединяем без учёта регистра и пробелов («Соль» = «соль»).
   const perItem = new Map();
   const catDisplay = new Map(); // ключ(lower) -> отображаемое имя категории
 
@@ -292,6 +293,8 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
     if (!headerRow) return;
     const cols = mapColumns(rows[headerRow]);
     if (!cols.name) return;
+    // Дневные колонки приход/расход и их даты (строка над шапкой).
+    const daily = dailyColumns(rows[headerRow], rows[headerRow - 1]);
 
     const defaultCategory = /хоз/i.test(sheet.name) ? "Хозтовары" : "Без категории";
     let lastCategory = defaultCategory;
@@ -325,8 +328,14 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
       if (!prevDisp || disp.length < prevDisp.length) catDisplay.set(catKey, disp);
 
       const stock = num(row[cols.balance]);
-      const periodOut = num(row[cols.consumption]);
-      const key = catKey + " " + name.toLowerCase();
+      // Реальные дневные движения этой строки: непустые ячейки приход/расход.
+      const moves = [];
+      for (const d of daily) {
+        const q = num(row[d.idx]);
+        if (!Number.isNaN(q) && q > 0) moves.push({ date: d.date, type: d.type, qty: q });
+      }
+
+      const key = catKey + " " + name.toLowerCase();
       let rec = perItem.get(key);
       if (!rec) {
         rec = {
@@ -334,9 +343,8 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
           name,
           stock: 0,
           stockIdx: -1,
-          periodOut: 0,
-          periodType: "week",
-          consIdx: -1,
+          moves: [],
+          movesIdx: -1,
           floorNum: 1,
           floorIdx: -1,
         };
@@ -352,11 +360,10 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
         rec.stock = stock;
         rec.stockIdx = sheetIdx;
       }
-      // Расход за период — из самого свежего листа, где он указан.
-      if (!Number.isNaN(periodOut) && sheetIdx >= rec.consIdx) {
-        rec.periodOut = periodOut;
-        rec.periodType = cols.consPeriod;
-        rec.consIdx = sheetIdx;
+      // Движения — из самого свежего листа, где встретился товар.
+      if (sheetIdx >= rec.movesIdx) {
+        rec.moves = moves;
+        rec.movesIdx = sheetIdx;
       }
     }
   });
@@ -370,20 +377,16 @@ export async function parseWorkbook(arrayBuffer, opts = {}) {
     if (!categories.includes(category)) categories.push(category);
     floorNums.add(rec.floorNum);
 
-    let outs = [];
-    if (rec.periodOut > 0) {
-      // Недельный итог кладём на последние 5 рабочих дней, месячный — на ~22.
-      const count = rec.periodType === "month" ? 22 : 5;
-      const days = lastWorkingDays(today, count, workingDays);
-      const per = round2(rec.periodOut / days.length);
-      outs = days.map((d) => ({ date: d, qty: per }));
-    }
+    // Записи по возрастанию даты — для наглядного порядка в карточке товара.
+    const moves = rec.moves
+      .slice()
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
     items.push({
       category,
       name: rec.name,
       floor: "Этаж " + rec.floorNum,
       stock: rec.stock,
-      outs,
+      moves,
     });
   }
   const floors = [...floorNums].sort((a, b) => a - b).map((n) => "Этаж " + n);
@@ -395,14 +398,11 @@ function textOf(files, name) {
   const b = files.get(name);
   return b ? new TextDecoder("utf-8").decode(b) : "";
 }
-function round2(x) {
-  return Math.round(x * 100) / 100;
-}
 
 export const _internals = {
   serialToISO,
-  lastWorkingDays,
   mapColumns,
+  dailyColumns,
   parseSheet,
   readSharedStrings,
   floorFromMarker,

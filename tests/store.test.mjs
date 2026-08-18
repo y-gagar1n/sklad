@@ -100,6 +100,68 @@ test("последний этаж удалить нельзя, а лишний �
   assert.equal(store.floors().length, 1);
 });
 
+test("импорт из Excel: движения переносятся с датами, остаток сходится", () => {
+  // Как у нутеллы в реальном файле: приход/расход по дням, «Итого остаток» = 6.
+  store.importFromParsed(
+    {
+      categories: ["Нутелла"],
+      floors: ["Этаж 1"],
+      items: [
+        {
+          category: "Нутелла",
+          name: "нутелла",
+          floor: "Этаж 1",
+          stock: 6,
+          moves: [
+            { date: "2026-08-03", type: "in", qty: 2 },
+            { date: "2026-08-07", type: "out", qty: 1 },
+            { date: "2026-08-18", type: "in", qty: 6 },
+            { date: "2026-08-18", type: "out", qty: 1 },
+          ],
+        },
+      ],
+    },
+    "2026-08-18",
+  );
+  const it = store.allItems().find((i) => i.name === "нутелла");
+  assert.equal(store.stockForItem(it.id), 6); // совпадает с «Итого остаток»
+  const mv = store.movementsForItem(it.id);
+  // Начального остатка нет: 6 − 8 + 2 = 0 → только 4 реальные записи.
+  assert.equal(mv.length, 4);
+  assert.ok(mv.every((m) => m.note === "Импорт из Excel" && !m.adjust));
+  const on18 = mv
+    .filter((m) => m.date === "2026-08-18")
+    .map((m) => `${m.type}:${m.qty}`)
+    .sort();
+  assert.deepEqual(on18, ["in:6", "out:1"]);
+});
+
+test("импорт из Excel: ненулевой остаток на начало заводится инвентаризацией", () => {
+  store.importFromParsed(
+    {
+      categories: ["Соль"],
+      floors: ["Этаж 1"],
+      items: [
+        {
+          category: "Соль",
+          name: "соль",
+          floor: "Этаж 1",
+          stock: 5,
+          moves: [{ date: "2026-08-10", type: "out", qty: 2 }],
+        },
+      ],
+    },
+    "2026-08-18",
+  );
+  const it = store.allItems().find((i) => i.name === "соль");
+  assert.equal(store.stockForItem(it.id), 5);
+  const open = store.movementsForItem(it.id).find((m) => m.adjust);
+  // начало = 5 − 0 + 2 = 7, датой за день до первого движения (10.08).
+  assert.equal(open.type, "in");
+  assert.equal(open.qty, 7);
+  assert.equal(open.date, "2026-08-09");
+});
+
 test("миграция: данные без этажей получают этаж и floorId у движений", () => {
   // Старое состояние без floors/floorId.
   store.replaceState({
