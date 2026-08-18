@@ -1,0 +1,60 @@
+# Авто-деплой бэка sklad-sync по пушу.
+#
+# test → deploy: сначала гоняем тесты (JS + Go), и только если зелёные — заходим на
+# VM по SSH и катим существующим deploy-sklad.sh. Секреты приложения
+# (/etc/sklad-sync/env) уже лежат на VM (bootstrap-sklad.sh) — воркфлоу их не трогает,
+# ему нужен только SSH-доступ.
+#
+# Требуются два GitHub Actions Secret:
+#   SKLAD_DEPLOY_SSH_KEY     — приватный ключ отдельной deploy-пары (публичный дописан
+#                              в ~yury-timofeev/.ssh/authorized_keys на VM)
+#   SKLAD_DEPLOY_KNOWN_HOSTS — вывод `ssh-keyscan 213.165.212.180` (pin host-ключа)
+name: Deploy backend
+
+on:
+  push:
+    branches: [claude/warehouse-inventory-app-e7s489]
+    paths:
+      - 'backend/**'
+      - 'deploy-sklad.sh'
+      - '.github/workflows/deploy-backend.yml'
+  workflow_dispatch: {}   # ручной запуск/повтор из вкладки Actions
+
+# Не даём двум деплоям идти одновременно (VM у нас один); идущий не рвём.
+concurrency:
+  group: deploy-vm
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: JS-тесты
+        run: ./test.sh
+      - name: Тесты бэкенда
+        run: go test -race ./...
+        working-directory: backend
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+      - name: Подготовить SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.SKLAD_DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "${{ secrets.SKLAD_DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+      - name: Деплой на VM
+        run: ./deploy-sklad.sh yury-timofeev@213.165.212.180

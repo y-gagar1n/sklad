@@ -56,6 +56,14 @@
 **Не трогать** `todo-sync` (порт 8080, `/var/lib/todo-sync/todo-sync.json`) и
 `agent-site` (порт 80). Деплой проверяет, что 443 не занят чужим сервисом.
 
+**Авто-деплой бэка по пушу.** `.github/workflows/deploy-backend.yml`: push в ветку
+Pages с правками в `backend/**`/`deploy-sklad.sh` → тесты (`./test.sh` + `go test
+-race`) как гейт → тот же `deploy-sklad.sh` по SSH на VM (ручной прогон —
+`workflow_dispatch`). Секреты приложения воркфлоу не трогает (`/etc/sklad-sync/env`
+уже на VM); ему нужен лишь SSH-доступ — секреты `SKLAD_DEPLOY_SSH_KEY` (приватный
+ключ отдельной deploy-пары) и `SKLAD_DEPLOY_KNOWN_HOSTS` в GitHub Actions. Приватный
+ключ в репозиторий не коммитить. `deploy-sklad.sh` вручную остаётся резервом.
+
 ## Тесты — на каждую фичу, и прогонять
 
 - JS: `./test.sh` (node:test, без зависимостей) — `tests/{calc,store,sync,xlsx-import}.test.mjs`.
