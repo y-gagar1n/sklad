@@ -1,7 +1,9 @@
 node_modules/
 .DS_Store
 *.log
-# Локальные артефакты бэкенда (собранный бинарь и файл данных сервера)
+# Локальные артефакты бэкенда (собранный бинарь и данные сервера)
 backend/sklad-sync
 backend/sklad-sync.json
+backend/data/
+backend/tenants/
 backend/public/

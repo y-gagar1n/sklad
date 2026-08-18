@@ -14,23 +14,32 @@
   `SKLAD_CORS_ORIGIN` (через запятую; пусто — любой; авторизация всё равно по
   bearer-токену, поэтому `*` безопасен). Разворачивается на VM
   `yury-timofeev@213.165.212.180`, порт 443, изолированно от соседнего `todo-sync`.
+- **Многотенантность** — токен = идентичность и граница изоляции. `-tokens-file`
+  (`/etc/sklad-sync/tokens`, строки `tenantId: token`) задаёт соответствия; у
+  каждого тенанта свой файл данных `-data-dir/<tenantId>.json` и свой `seq` — токен
+  A не видит данные токена B. `tenantId` — стабильная метка (файл именуется по ней,
+  не по токену), поэтому ротация токена сохраняет склад; на метку можно несколько
+  токенов. Fallback: нет tokens-файла, но задан env `SKLAD_SYNC_TOKEN` → один тенант
+  `default`. Реестр «кто есть кто» — локально `~/.config/sklad-sync/tokens`; управление
+  — `./sklad-tokens.sh {list|add|rotate|remove}` (правит реестр, зеркалит на VM,
+  рестартит сервис — без редеплоя). Ядро слияния от тенантов не зависит.
 
 ## ⛔ Секреты НЕ коммитить
 
 **В репозиторий (он публичный) не попадает ни один секрет.** Никогда не
 добавляй в git, в коммит-сообщения, в issue/PR и в скриншоты:
 
-- **токен доступа** (`SKLAD_SYNC_TOKEN`) — живёт в `/etc/sklad-sync/env` на VM
-  (mode 0600) и в `~/.config/sklad-sync/token` на dev-машине;
+- **токены доступа** (реестр `tenantId: token`) — живут в `/etc/sklad-sync/tokens`
+  на VM (mode 0600) и в `~/.config/sklad-sync/tokens` на dev-машине;
 - приватные **TLS-ключи** (если когда-то используется режим `-tls-key`);
-- содержимое `/etc/sklad-sync/env`, файлы из `~/.config/sklad-sync/`.
+- содержимое `/etc/sklad-sync/{env,tokens}`, файлы из `~/.config/sklad-sync/`.
 
-В репо — только код и публичные вещи. Файл данных сервера (`sklad-sync.json`) и
-собранный бинарь — в `.gitignore`. Токен вводится на каждом устройстве вручную
-(хранится в `localStorage`, не синкается) и подкладывается на сервер скриптом
-`bootstrap-sklad.sh` по SSH — не через репозиторий. Если секрет всё же утёк —
-ротация: новый токен через `bootstrap-sklad.sh` → `deploy-sklad.sh`, затем вбить
-новый токен на устройствах.
+В репо — только код и публичные вещи. Данные сервера (`data/`, `tenants/`,
+`sklad-sync.json`) и собранный бинарь — в `.gitignore`. Токен вводится на каждом
+устройстве вручную (хранится в `localStorage`, не синкается) и подкладывается на
+сервер через `bootstrap-sklad.sh`/`sklad-tokens.sh` по SSH — не через репозиторий.
+Если токен утёк — `./sklad-tokens.sh rotate <tenantId>` (старый инвалидируется,
+данные тенанта сохраняются), затем вбить новый на устройствах.
 
 ## Синхронизация — инварианты
 
@@ -50,9 +59,10 @@
 
 ## Деплой — изоляция от `todo`
 
-Скрипты `deploy-sklad.sh`/`bootstrap-sklad.sh` и юниты `backend/deploy/*`
-работают **только** с namespace `sklad-sync`: пользователь `sklad-sync`, каталоги
-`/opt|/var/lib|/etc|/var/backups/sklad-sync`, порт 443, данные `sklad-sync.json`.
+Скрипты `deploy-sklad.sh`/`bootstrap-sklad.sh`/`sklad-tokens.sh` и юниты
+`backend/deploy/*` работают **только** с namespace `sklad-sync`: пользователь
+`sklad-sync`, каталоги `/opt|/var/lib|/etc|/var/backups/sklad-sync`, порт 443,
+данные `/var/lib/sklad-sync/tenants/<tenantId>.json` (бэкап — tar.gz всего каталога).
 **Не трогать** `todo-sync` (порт 8080, `/var/lib/todo-sync/todo-sync.json`) и
 `agent-site` (порт 80). Деплой проверяет, что 443 не занят чужим сервисом.
 
@@ -85,11 +95,16 @@ Pages с правками в `backend/**`/`deploy-sklad.sh` → тесты (`./t
 
 ```bash
 # локальный запуск сервера (localhost — secure-context, TLS не нужен)
-cd backend && SKLAD_SYNC_TOKEN=dev go run . -addr 127.0.0.1:8099 -static .. -data /tmp/sklad-dev.json
+# один тенант из env (fallback):
+cd backend && SKLAD_SYNC_TOKEN=dev go run . -addr 127.0.0.1:8099 -static .. -data-dir /tmp/sklad-dev
+# несколько тенантов через tokens-файл:
+printf 'anya: aaa\nbob: bbb\n' > /tmp/sklad-tokens
+cd backend && go run . -addr 127.0.0.1:8099 -tokens-file /tmp/sklad-tokens -data-dir /tmp/sklad-dev
 
 ./test.sh                          # JS-тесты
 cd backend && go test -race ./...  # тесты сервера
 
-./bootstrap-sklad.sh               # разово: секреты на VM (токен+домен)
+./bootstrap-sklad.sh               # разово: секреты на VM (домен+CORS+реестр токенов)
 ./deploy-sklad.sh                  # деплой на VM
+./sklad-tokens.sh add <tenantId>   # завести пользователя (без редеплоя)
 ```

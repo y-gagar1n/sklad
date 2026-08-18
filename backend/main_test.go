@@ -30,6 +30,34 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+// muxFor собирает mux вокруг готового *Store: оборачивает его в одно-тенантный
+// менеджер (стор предзагружен под меткой "default"), token → "default". Так
+// существующие тесты, инспектирующие s.state, продолжают работать.
+func muxFor(s *Store, token string) *http.ServeMux {
+	m := &StoreManager{stores: map[string]*Store{"default": s}}
+	return newMux(m, map[string]string{token: "default"}, "")
+}
+
+func newTestManager(t *testing.T) *StoreManager {
+	t.Helper()
+	m, err := NewStoreManager(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func doWipe(t *testing.T, h http.Handler, token string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/wipe", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("wipe вернул %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // ── apply (LWW) ─────────────────────────────────────────────────────────────
 
 func TestApplyLWW(t *testing.T) {
@@ -122,7 +150,7 @@ func doSync(t *testing.T, h http.Handler, token string, body map[string]any) map
 
 func TestSyncPushPullCursor(t *testing.T) {
 	s := newTestStore(t)
-	h := newMux(s, "secret", "")
+	h := muxFor(s, "secret")
 
 	// Пуш двух товаров.
 	resp := doSync(t, h, "secret", map[string]any{
@@ -163,7 +191,7 @@ func TestSyncPushPullCursor(t *testing.T) {
 
 func TestSyncMultipleCollections(t *testing.T) {
 	s := newTestStore(t)
-	h := newMux(s, "secret", "")
+	h := muxFor(s, "secret")
 	resp := doSync(t, h, "secret", map[string]any{
 		"since":      0,
 		"categories": []Record{rec("c1", 10, false, `{"name":"Молоко"}`)},
@@ -185,7 +213,7 @@ func TestSyncMultipleCollections(t *testing.T) {
 
 func TestWipeTombstonesAll(t *testing.T) {
 	s := newTestStore(t)
-	h := newMux(s, "secret", "")
+	h := muxFor(s, "secret")
 	doSync(t, h, "secret", map[string]any{
 		"since": 0,
 		"items": []Record{rec("a", 100, false, `{"n":1}`)},
@@ -211,7 +239,7 @@ func TestWipeTombstonesAll(t *testing.T) {
 
 func TestRequireToken(t *testing.T) {
 	s := newTestStore(t)
-	h := newMux(s, "secret", "")
+	h := muxFor(s, "secret")
 	cases := []struct {
 		name, header string
 		want         int
@@ -237,7 +265,7 @@ func TestRequireToken(t *testing.T) {
 
 func TestHealthOpen(t *testing.T) {
 	s := newTestStore(t)
-	h := newMux(s, "secret", "")
+	h := muxFor(s, "secret")
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, req)
@@ -248,7 +276,7 @@ func TestHealthOpen(t *testing.T) {
 
 func TestSyncRejectsGet(t *testing.T) {
 	s := newTestStore(t)
-	h := newMux(s, "secret", "")
+	h := muxFor(s, "secret")
 	req := httptest.NewRequest(http.MethodGet, "/sync", nil)
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
@@ -281,7 +309,7 @@ func TestCORS(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := newTestStore(t)
-			h := withCORS(tc.allowed, newMux(s, "secret", ""))
+			h := withCORS(tc.allowed, muxFor(s, "secret"))
 			req := httptest.NewRequest(tc.method, "/health", nil)
 			if tc.origin != "" {
 				req.Header.Set("Origin", tc.origin)
@@ -319,7 +347,7 @@ func TestPersistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sklad-sync.json")
 	s1, _ := NewStore(path)
-	h := newMux(s1, "secret", "")
+	h := muxFor(s1, "secret")
 	doSync(t, h, "secret", map[string]any{
 		"since": 0,
 		"items": []Record{rec("a", 100, false, `{"n":1}`)},
@@ -344,7 +372,7 @@ func TestPersistence(t *testing.T) {
 
 func TestConcurrentSync(t *testing.T) {
 	s := newTestStore(t)
-	h := newMux(s, "secret", "")
+	h := muxFor(s, "secret")
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
 		wg.Add(1)
@@ -369,5 +397,164 @@ func TestConcurrentSync(t *testing.T) {
 	}
 	if s.state.Seq != 20 {
 		t.Fatalf("seq должен быть 20, получили %d", s.state.Seq)
+	}
+}
+
+// ── многотенантность ─────────────────────────────────────────────────────────
+
+// Токен A не видит данные токена B, и wipe одного тенанта не трогает другого.
+func TestTenantIsolation(t *testing.T) {
+	m := newTestManager(t)
+	h := newMux(m, map[string]string{"ta": "anya", "tb": "bob"}, "")
+
+	// anya пушит товар.
+	doSync(t, h, "ta", map[string]any{
+		"since": 0,
+		"items": []Record{rec("x", 100, false, `{"n":1}`)},
+	})
+
+	// bob с нуля видит пустоту и seq=0 — данные изолированы.
+	resp := doSync(t, h, "tb", map[string]any{"since": 0})
+	var itemsB []Record
+	json.Unmarshal(resp["items"], &itemsB)
+	if len(itemsB) != 0 {
+		t.Fatalf("bob не должен видеть данные anya, получил %d", len(itemsB))
+	}
+	var seqB int64
+	json.Unmarshal(resp["seq"], &seqB)
+	if seqB != 0 {
+		t.Fatalf("seq bob должен быть 0, получили %d", seqB)
+	}
+
+	// bob делает wipe — это не должно затронуть склад anya.
+	doWipe(t, h, "tb")
+	sa, _ := m.get("anya")
+	if sa.state.Coll["items"]["x"] == nil || sa.state.Coll["items"]["x"].Deleted {
+		t.Fatalf("wipe bob не должен затрагивать данные anya")
+	}
+
+	// anya всё ещё видит свой товар.
+	resp2 := doSync(t, h, "ta", map[string]any{"since": 0})
+	var itemsA []Record
+	json.Unmarshal(resp2["items"], &itemsA)
+	if len(itemsA) != 1 {
+		t.Fatalf("anya должна видеть 1 товар, получили %d", len(itemsA))
+	}
+}
+
+// Несколько токенов авторизуются, каждый в свой тенант; кривой — 401.
+func TestMultiTokenAuth(t *testing.T) {
+	m := newTestManager(t)
+	h := newMux(m, map[string]string{"t1": "a", "t2": "b"}, "")
+	cases := []struct {
+		header string
+		want   int
+	}{
+		{"", http.StatusUnauthorized},
+		{"Bearer wrong", http.StatusUnauthorized},
+		{"Bearer t1", http.StatusOK},
+		{"Bearer t2", http.StatusOK},
+	}
+	for _, c := range cases {
+		req := httptest.NewRequest(http.MethodPost, "/sync", bytes.NewReader([]byte(`{"since":0}`)))
+		if c.header != "" {
+			req.Header.Set("Authorization", c.header)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != c.want {
+			t.Fatalf("%q: ждали %d, получили %d", c.header, c.want, w.Code)
+		}
+	}
+}
+
+// Файлы данных именуются по tenantId, курсоры seq независимы, всё переживает
+// перезапуск (перечитывание менеджером из того же каталога).
+func TestTenantPersistenceAndSeq(t *testing.T) {
+	dir := t.TempDir()
+	m1, err := NewStoreManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newMux(m1, map[string]string{"ta": "anya", "tb": "bob"}, "")
+
+	doSync(t, h, "ta", map[string]any{
+		"since": 0,
+		"items": []Record{rec("a1", 10, false, `{}`), rec("a2", 20, false, `{}`)},
+	}) // anya: seq→2
+	doSync(t, h, "tb", map[string]any{
+		"since": 0,
+		"items": []Record{rec("b1", 10, false, `{}`)},
+	}) // bob: seq→1
+
+	for _, id := range []string{"anya", "bob"} {
+		if _, err := os.Stat(filepath.Join(dir, id+".json")); err != nil {
+			t.Fatalf("нет файла тенанта %s.json: %v", id, err)
+		}
+	}
+
+	// Новый менеджер читает те же файлы — курсоры и данные раздельны.
+	m2, err := NewStoreManager(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sa, _ := m2.get("anya")
+	sb, _ := m2.get("bob")
+	if sa.state.Seq != 2 {
+		t.Fatalf("anya seq=2 ожидался, получили %d", sa.state.Seq)
+	}
+	if sb.state.Seq != 1 {
+		t.Fatalf("bob seq=1 ожидался, получили %d", sb.state.Seq)
+	}
+	if len(sa.state.Coll["items"]) != 2 || len(sb.state.Coll["items"]) != 1 {
+		t.Fatalf("данные тенантов перепутались/потерялись: anya=%d bob=%d",
+			len(sa.state.Coll["items"]), len(sb.state.Coll["items"]))
+	}
+}
+
+// ── разбор tokens-файла ──────────────────────────────────────────────────────
+
+func TestParseTokensFile(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "tokens")
+
+	// Валидный файл: комментарии и пустые строки игнорируются.
+	os.WriteFile(p, []byte("# кто есть кто\nanya: aaa\nbob:  bbb\n\n"), 0o600)
+	m, err := parseTokensFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["aaa"] != "anya" || m["bbb"] != "bob" || len(m) != 2 {
+		t.Fatalf("неверный разбор: %#v", m)
+	}
+
+	// Недопустимый tenantId (заглавные/спецсимволы) — ошибка.
+	os.WriteFile(p, []byte("Anya!: x\n"), 0o600)
+	if _, err := parseTokensFile(p); err == nil {
+		t.Fatalf("ожидали ошибку на недопустимый tenantId")
+	}
+
+	// Дубликат токена — ошибка (иначе он бы молча перекрыл тенанта).
+	os.WriteFile(p, []byte("a: t\nb: t\n"), 0o600)
+	if _, err := parseTokensFile(p); err == nil {
+		t.Fatalf("ожидали ошибку на дубликат токена")
+	}
+
+	// Пустой файл — ошибка.
+	os.WriteFile(p, []byte("# только комментарий\n"), 0o600)
+	if _, err := parseTokensFile(p); err == nil {
+		t.Fatalf("ожидали ошибку на пустой файл")
+	}
+}
+
+// Обратная совместимость: нет файла → одиночный токен из env как тенант "default".
+func TestLoadTokensEnvFallback(t *testing.T) {
+	t.Setenv("SKLAD_SYNC_TOKEN", "legacy")
+	m, err := loadTokens(filepath.Join(t.TempDir(), "нет-такого"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(m) != 1 || m["legacy"] != "default" {
+		t.Fatalf("ожидали {legacy:default}, получили %#v", m)
 	}
 }

@@ -1,29 +1,31 @@
 #!/usr/bin/env bash
 # Снимок данных sklad-sync. Ставится на VM как /opt/sklad-sync/backup.sh и
-# запускается юнитом sklad-sync-backup.service (таймер — раз в сутки), а также
-# вручную из restore-sklad.sh перед перезаписью данных.
+# запускается юнитом sklad-sync-backup.service (таймер — раз в сутки); можно
+# дёрнуть вручную (sudo systemctl start sklad-sync-backup.service).
 #
-# Сервер пишет файл данных через tmp+rename, поэтому копия снимается на живом
-# сервисе: читатель всегда видит целую версию.
+# Многотенантность: у каждого тенанта свой файл <data-dir>/<id>.json, поэтому
+# снимаем весь каталог tenants/ одним tar.gz. Каждый файл сервер пишет через
+# tmp+rename (атомарно), так что отдельные файлы в архиве всегда целые; временные
+# *.tmp исключаем. Восстановление одного тенанта = достать его <id>.json из архива.
 set -euo pipefail
 
-SRC=/var/lib/sklad-sync/sklad-sync.json
+SRC_DIR=/var/lib/sklad-sync/tenants
 DEST_DIR=/var/backups/sklad-sync
 KEEP_DAYS=30
 
-if [ ! -f "$SRC" ]; then
-    echo "нет $SRC — бэкапить нечего"
+# Каталога нет или он пуст (ни одного синка ещё не было) — бэкапить нечего.
+if [ ! -d "$SRC_DIR" ] || [ -z "$(ls -A "$SRC_DIR" 2>/dev/null)" ]; then
+    echo "нет данных в $SRC_DIR — бэкапить нечего"
     exit 0
 fi
 
-OUT="$DEST_DIR/sklad-sync-$(date -u +%Y%m%d-%H%M%S).json.gz"
+OUT="$DEST_DIR/sklad-sync-$(date -u +%Y%m%d-%H%M%S).tar.gz"
 
-# gzip -n: без имени и времени в заголовке. Пишем в .part и переименовываем —
-# прерванный на полпути таймер не оставит огрызок.
-gzip -nc "$SRC" > "$OUT.part"
+# Пишем в .part и переименовываем — прерванный на полпути таймер не оставит огрызок.
+tar --exclude='*.tmp' -czf "$OUT.part" -C "$(dirname "$SRC_DIR")" "$(basename "$SRC_DIR")"
 mv "$OUT.part" "$OUT"
 chmod 0640 "$OUT"
 
-find "$DEST_DIR" -maxdepth 1 -name 'sklad-sync-*.json.gz' -mtime "+$KEEP_DAYS" -delete
+find "$DEST_DIR" -maxdepth 1 -name 'sklad-sync-*.tar.gz' -mtime "+$KEEP_DAYS" -delete
 
 echo "OK: $OUT"

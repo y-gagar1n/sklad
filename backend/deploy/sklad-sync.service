@@ -7,14 +7,16 @@ Type=simple
 User=sklad-sync
 Group=sklad-sync
 WorkingDirectory=/var/lib/sklad-sync
-# SKLAD_SYNC_TOKEN и SKLAD_ACME_DOMAIN лежат в /etc/sklad-sync/env
-# (mode 0600, owner sklad-sync). Файл создаётся вручную bootstrap-sklad.sh,
-# deploy-sklad.sh его не трогает.
+# SKLAD_ACME_DOMAIN и SKLAD_CORS_ORIGIN лежат в /etc/sklad-sync/env
+# (mode 0600, owner sklad-sync). Токены (метка→токен) — в /etc/sklad-sync/tokens.
+# Оба файла кладёт bootstrap-sklad.sh; deploy-sklad.sh их не трогает.
 EnvironmentFile=/etc/sklad-sync/env
-# Домен для авто-сертификата берётся из env SKLAD_ACME_DOMAIN → слушаем :443
-# с валидным Let's Encrypt (TLS-ALPN-01). Статику отдаём из /opt/sklad-sync/public.
+# Многотенантность: -tokens-file задаёт соответствия 'tenantId: token', у каждого
+# тенанта свой файл данных в -data-dir (<tenantId>.json). Домен авто-сертификата —
+# из env SKLAD_ACME_DOMAIN (:443, Let's Encrypt). Статика — из /opt/sklad-sync/public.
 ExecStart=/opt/sklad-sync/sklad-sync \
-    -data /var/lib/sklad-sync/sklad-sync.json \
+    -data-dir /var/lib/sklad-sync/tenants \
+    -tokens-file /etc/sklad-sync/tokens \
     -static /opt/sklad-sync/public \
     -acme-cache /var/lib/sklad-sync/acme
 Restart=always

@@ -41,18 +41,39 @@ function makeServer() {
   return { names, coll, get seq() { return seq; }, apply, changedSince };
 }
 
-let server = makeServer();
+// Многотенантность: свой server-model на токен (как <data-dir>/<tenant>.json на
+// бэке). Токен берём из заголовка Authorization; отсутствие токена → 401. Ленивое
+// создание тенанта — токен и есть ключ изоляции.
+const tenants = new Map();
+function serverFor(token) {
+  if (!tenants.has(token)) tenants.set(token, makeServer());
+  return tenants.get(token);
+}
 
-// fetch-шим поверх модели сервера.
+// server — модель тенанта токена "t" (его ставит fresh()); на неё смотрят тесты.
+let server = serverFor("t");
+
+function bearer(opts) {
+  const h = opts.headers || {};
+  const raw = typeof h.get === "function"
+    ? h.get("Authorization") || ""
+    : h.Authorization || h.authorization || "";
+  return raw.startsWith("Bearer ") ? raw.slice(7) : "";
+}
+
+// fetch-шим поверх моделей тенантов.
 globalThis.fetch = async (url, opts = {}) => {
   if (url.endsWith("/health")) return { ok: true, status: 200 };
-  if (url.endsWith("/sync")) {
+  if (url.endsWith("/sync") || url.endsWith("/wipe")) {
+    const token = bearer(opts);
+    if (!token) return { ok: false, status: 401, json: async () => ({}) };
+    const srv = serverFor(token);
     const body = JSON.parse(opts.body || "{}");
     let since = body.since || 0;
-    if (since > server.seq) since = 0;
-    for (const n of server.names) server.apply(n, body[n]);
-    const out = { seq: server.seq };
-    for (const n of server.names) out[n] = server.changedSince(n, since);
+    if (since > srv.seq) since = 0;
+    for (const n of srv.names) srv.apply(n, body[n]);
+    const out = { seq: srv.seq };
+    for (const n of srv.names) out[n] = srv.changedSince(n, since);
     return { ok: true, status: 200, json: async () => out };
   }
   return { ok: false, status: 404, json: async () => ({}) };
@@ -63,7 +84,8 @@ const sync = await import("../assets/sync.js");
 
 function fresh() {
   mem.clear();
-  server = makeServer();
+  tenants.clear();
+  server = serverFor("t"); // тенант токена "t" — с ним работает клиент по умолчанию
   store.replaceState({});
   sync.resetSyncState();
   sync.setConfig({ url: "https://x.example", token: "t" });
@@ -206,4 +228,36 @@ test("pullReplace: второе устройство становится зер
   assert.equal(store.getCategory("C1").name, "Чай");
   // Локального мусора больше нет (заменили серверными).
   assert.equal(store.categories().length, 1);
+});
+
+// ── Многотенантность ──────────────────────────────────────────────────────
+
+test("сервер изолирует данные по токену; без токена — 401", async () => {
+  fresh();
+  const url = "https://x.example/sync";
+  const hdr = (tok) => ({ "Content-Type": "application/json", Authorization: "Bearer " + tok });
+
+  // Тенант A пушит товар.
+  const rA = await fetch(url, {
+    method: "POST",
+    headers: hdr("ta"),
+    body: JSON.stringify({ since: 0, items: [{ id: "x", updatedAt: 100, deleted: false, data: { n: 1 } }] }),
+  });
+  const outA = await rA.json();
+  assert.equal(outA.items.length, 1);
+
+  // Тенант B с нуля видит пусто и seq=0 — данные изолированы.
+  const rB = await fetch(url, { method: "POST", headers: hdr("tb"), body: JSON.stringify({ since: 0 }) });
+  const outB = await rB.json();
+  assert.equal(outB.items.length, 0);
+  assert.equal(outB.seq, 0);
+
+  // Тенант A по-прежнему видит свой товар.
+  const rA2 = await fetch(url, { method: "POST", headers: hdr("ta"), body: JSON.stringify({ since: 0 }) });
+  const outA2 = await rA2.json();
+  assert.equal(outA2.items.length, 1);
+
+  // Без Authorization — 401.
+  const rNo = await fetch(url, { method: "POST", headers: {}, body: "{}" });
+  assert.equal(rNo.status, 401);
 });
