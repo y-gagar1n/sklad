@@ -288,6 +288,7 @@ function renderOverview() {
       `</div>`;
   }
 
+  html += collapseAllRow(["ov:order", "ov:cats"]);
   html += `<div class="ov-cols"><div class="ov-col">${orderHtml}</div><div class="ov-col">${catsHtml}</div></div>`;
 
   view.innerHTML = html;
@@ -366,14 +367,17 @@ function catHead(key, nameHtml, rightHtml = "", { extra = "" } = {}) {
   </div>`;
 }
 
-// Кнопка «Свернуть все / Развернуть все» — вне поиска и если есть категории.
-function collapseAllRow() {
-  if (itemSearch.trim()) return "";
-  const cats = store.categories();
-  if (!cats.length) return "";
-  const allCollapsed = cats.every((c) => isCollapsed("items:" + c.id));
-  return `<div style="text-align:right;margin:-4px 0 10px">
-    <button class="btn secondary small" data-act="toggle-all-cats">${allCollapsed ? "Развернуть все" : "Свернуть все"}</button>
+// Кнопка «Свернуть все / Развернуть все» для набора сворачиваемых секций.
+// keys — ключи collapseState (все с обычным дефолтом «развёрнуто»). Показываем
+// только когда секций ≥ 2 — для одной сворачивать «все» смысла нет.
+function collapseAllRow(keys) {
+  keys = (keys || []).filter(Boolean);
+  if (keys.length < 2) return "";
+  const allCollapsed = keys.every((k) => isCollapsed(k));
+  return `<div class="collapse-all-row">
+    <button class="btn secondary small" data-act="toggle-all" data-keys="${esc(keys.join(","))}">${
+      allCollapsed ? "Развернуть все" : "Свернуть все"
+    }</button>
   </div>`;
 }
 
@@ -391,7 +395,7 @@ function renderItems() {
       <button class="icon-btn search-clear" id="search-clear" ${itemSearch ? "" : "hidden"} title="Очистить">✕</button>
     </div>
     <button class="btn block" data-act="add-item-global">＋ Товар</button>
-    ${collapseAllRow()}
+    ${itemSearch.trim() ? "" : collapseAllRow(store.categories().map((c) => "items:" + c.id))}
     <div id="items-list"></div>`;
 
   renderItemsList();
@@ -541,6 +545,16 @@ function renderEntry() {
       <button class="icon-btn search-clear" id="entry-search-clear" ${entrySearch ? "" : "hidden"} title="Очистить">✕</button>
     </div>
     <p class="hint">Приход/расход записываются на выбранный этаж. Нажмите «Приход» или «Расход» у нужного товара.</p>
+    ${
+      entrySearch.trim()
+        ? ""
+        : collapseAllRow(
+            store
+              .categories()
+              .filter((c) => store.itemsOf(c.id).length)
+              .map((c) => "entry:" + c.id),
+          )
+    }
     <div id="entry-list"></div>`;
 
   renderEntryList();
@@ -728,6 +742,9 @@ function analyticsOrder() {
   // Средние по категориям.
   html += `<h2 class="section-title">Средние по категориям</h2>`;
   html += `<p class="hint" style="margin-top:0">Считаются за последние ${st.windowDays} дн. (${modeTxt}), по ${analyticsScopeLabel()}.</p>`;
+  html += collapseAllRow(
+    cats.filter((c) => store.itemsOf(c.id).length).map((c) => "an-avg:" + c.id),
+  );
   html += cats
     .map((c) => {
       const its = store.itemsOf(c.id);
@@ -797,6 +814,7 @@ function analyticsReport() {
 
   let gIn = 0;
   let gOut = 0;
+  const repKeys = [];
   const blocks = cats
     .map((c) => {
       const its = store.itemsOf(c.id);
@@ -818,6 +836,7 @@ function analyticsReport() {
         </div>`);
       }
       if (!lines.length) return "";
+      repKeys.push("an-rep:" + c.id);
       gIn += cin;
       gOut += cout;
       const right = `<span style="color:var(--in)">${inStr(cin)}</span> · <span style="color:var(--out)">${outStr(cout)}</span>`;
@@ -836,6 +855,7 @@ function analyticsReport() {
     </div>
     <div class="hint">${fmtDate(from)} — ${fmtDate(to)} · этаж «${esc(store.getActiveFloor()?.name || "")}». Переносы между этажами не учитываются.</div>
   </div>`;
+  html += collapseAllRow(repKeys);
   html += blocks || `<div class="empty">За выбранный период движений нет.</div>`;
   return html;
 }
@@ -1285,6 +1305,7 @@ function sheetItemDetail(id, { scope } = {}) {
     <button class="btn secondary block" data-act="transfer" data-item="${id}" data-act-floor="${actionFloorId}">🔀 Перенести на другой этаж</button>
 
     <h2 class="section-title">Движения по этажам</h2>
+    ${collapseAllRow(floorsWithMv.map(({ f }) => "mv:" + f.id))}
     ${historyHtml}
 
     <div class="divider"></div>
@@ -1778,12 +1799,15 @@ document.addEventListener("click", (e) => {
     toast("Демо-данные загружены");
     return;
   }
-  if (act === "toggle-all-cats") {
-    const cats = store.categories();
-    const collapse = !cats.every((c) => isCollapsed("items:" + c.id));
-    cats.forEach((c) => (collapseState["items:" + c.id] = collapse));
+  if (act === "toggle-all") {
+    const keys = (t.closest("[data-act]").dataset.keys || "").split(",").filter(Boolean);
+    if (!keys.length) return;
+    // Если хоть одна секция развёрнута — сворачиваем все; иначе разворачиваем.
+    const collapse = !keys.every((k) => isCollapsed(k));
+    keys.forEach((k) => (collapseState[k] = collapse));
     saveCollapse();
-    render();
+    if (t.closest("#sheet-content") && rerenderSheet) rerenderSheet();
+    else render();
     return;
   }
   if (act === "go-items") return switchTab("items");

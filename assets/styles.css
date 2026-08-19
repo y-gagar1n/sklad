@@ -133,6 +133,12 @@ h2.section-title:first-child {
   margin-top: 4px;
 }
 
+/* Кнопка «Свернуть все / Развернуть все» над сворачиваемыми списками */
+.collapse-all-row {
+  text-align: right;
+  margin: -4px 0 10px;
+}
+
 /* Карточки */
 .card {
   background: var(--surface);
