@@ -519,6 +519,26 @@ function renderEntry() {
 let analyticsMode = "order"; // 'order' | 'report'
 let reportFrom = addDays(todayISO(), -29);
 let reportTo = todayISO();
+// Масштаб аналитики: null = все этажи (общая), иначе id конкретного этажа.
+// Локальный для экрана — глобальный активный этаж не трогает.
+let analyticsFloor = null;
+
+// Выбор масштаба аналитики: «Все этажи» + по этажам. Если этаж один — не нужен.
+function analyticsFloorBar() {
+  const fl = store.floors();
+  if (fl.length < 2) return "";
+  const chip = (id, label) =>
+    `<button class="floor-chip ${analyticsFloor === id ? "on" : ""}" data-afloor="${id ?? "all"}">${esc(label)}</button>`;
+  return `<div class="floor-bar">${chip(null, "Все этажи")}${fl
+    .map((f) => chip(f.id, f.name))
+    .join("")}</div>`;
+}
+
+// Имя выбранного масштаба — для подписей в аналитике.
+function analyticsScopeLabel() {
+  if (analyticsFloor === null) return "всем этажам";
+  return `этажу «${store.getFloor(analyticsFloor)?.name || ""}»`;
+}
 
 function renderAnalytics() {
   const view = $("#view-analytics");
@@ -534,8 +554,11 @@ function renderAnalytics() {
     return;
   }
 
+  // Если выбранного этажа больше нет (удалили) — вернуться к «Все этажи».
+  if (analyticsFloor !== null && !store.getFloor(analyticsFloor)) analyticsFloor = null;
+
   let html =
-    floorBar() +
+    analyticsFloorBar() +
     `<div class="segmented">
       <button class="seg ${analyticsMode === "order" ? "on" : ""}" data-mode="order">Заказать</button>
       <button class="seg ${analyticsMode === "report" ? "on" : ""}" data-mode="report">Отчёт за период</button>
@@ -564,7 +587,10 @@ function analyticsOrder() {
   const modeTxt = st.workingDaysOnly ? "по рабочим дням" : "по всем дням";
   const rows = store
     .allItems()
-    .map((it) => ({ it, s: itemSummary(store.movementsForItem(it.id), it, opts) }));
+    .map((it) => ({
+      it,
+      s: itemSummary(store.movementsForItem(it.id, analyticsFloor), it, opts),
+    }));
 
   const toOrder = rows
     .filter((r) => r.s.order > 0)
@@ -592,7 +618,7 @@ function analyticsOrder() {
 
   // Средние по категориям.
   html += `<h2 class="section-title">Средние по категориям</h2>`;
-  html += `<p class="hint" style="margin-top:0">Считаются за последние ${st.windowDays} дн. (${modeTxt}), по текущему этажу.</p>`;
+  html += `<p class="hint" style="margin-top:0">Считаются за последние ${st.windowDays} дн. (${modeTxt}), по ${analyticsScopeLabel()}.</p>`;
   html += cats
     .map((c) => {
       const its = store.itemsOf(c.id);
@@ -670,7 +696,7 @@ function analyticsReport() {
       let cout = 0;
       const lines = [];
       for (const it of its) {
-        const mv = store.movementsForItem(it.id);
+        const mv = store.movementsForItem(it.id, analyticsFloor);
         const inSum = sumReceipts(mv, from, to);
         const outSum = sumConsumption(mv, from, to);
         if (inSum === 0 && outSum === 0) continue;
@@ -1021,37 +1047,43 @@ function mvRow2(m) {
   </div>`;
 }
 
-function sheetItemDetail(id) {
+function sheetItemDetail(id, { scope } = {}) {
   const it = store.getItem(id);
   if (!it) return;
   const opts = store.calcOpts();
-  const movements = store.movementsForItem(id);
+  // scope: undefined = активный этаж (обычное открытие); null = все этажи
+  // (сводка по всем + история колонками); id = конкретный этаж.
+  const floorColumns = scope === null;
+  const summaryScope = scope === undefined ? store.getActiveFloorId() : scope;
+  const movements = store.movementsForItem(id, summaryScope);
   const s = itemSummary(movements, it, opts);
   const cat = store.getCategory(it.categoryId);
-  const floor = store.getActiveFloor();
+  const stockLabel = floorColumns
+    ? "все этажи"
+    : `этаж «${esc(store.getFloor(summaryScope)?.name || "")}»`;
 
   const daysTxt = s.daysLeft === Infinity ? "нет расхода" : `${fmt(s.daysLeft)} дн.`;
 
   // История движений по этажам: 2 колонки (приход | расход) по датам, свежие
-  // сверху. У каждого движения — правка/удаление (кроме переносов).
+  // сверху. У каждого движения — правка/удаление (кроме переносов). В режиме
+  // «все этажи» карточки этажей идут колонками рядом (по одной на этаж).
   const PER_FLOOR = 60;
   const floorsWithMv = store
     .floors()
     .map((f) => ({ f, mv: store.movementsForItem(id, f.id) }))
     .filter((x) => x.mv.length);
-  const historyHtml = floorsWithMv.length
-    ? floorsWithMv
-        .map(({ f, mv }) => {
-          const rows = [...mv]
-            .reverse()
-            .slice(0, PER_FLOOR)
-            .map((m) => mvRow2(m))
-            .join("");
-          const more =
-            mv.length > PER_FLOOR
-              ? `<div class="card-pad muted">…и ещё ${mv.length - PER_FLOOR}</div>`
-              : "";
-          return `<div class="card">
+  const floorCards = floorsWithMv
+    .map(({ f, mv }) => {
+      const rows = [...mv]
+        .reverse()
+        .slice(0, PER_FLOOR)
+        .map((m) => mvRow2(m))
+        .join("");
+      const more =
+        mv.length > PER_FLOOR
+          ? `<div class="card-pad muted">…и ещё ${mv.length - PER_FLOOR}</div>`
+          : "";
+      return `<div class="card">
             <div class="cat-head"><span>${esc(f.name)}</span><span class="cat-stock">ост. ${fmt(store.stockForItem(id, f.id))} ${esc(un(it.unit))}</span></div>
             <div class="mv-head">
               <span>Дата</span>
@@ -1061,9 +1093,13 @@ function sheetItemDetail(id) {
             </div>
             ${rows}${more}
           </div>`;
-        })
-        .join("")
-    : `<div class="muted">Движений пока нет.</div>`;
+    })
+    .join("");
+  const historyHtml = !floorsWithMv.length
+    ? `<div class="muted">Движений пока нет.</div>`
+    : floorColumns
+      ? `<div class="floor-cols">${floorCards}</div>`
+      : floorCards;
 
   openSheet(`
     <h3>${esc(it.name)}</h3>
@@ -1073,7 +1109,7 @@ function sheetItemDetail(id) {
     </div>
 
     <div class="card-pad" style="background:var(--surface-2);border-radius:var(--radius-sm);text-align:center;margin-bottom:14px">
-      <div class="muted">Остаток · этаж «${esc(floor?.name || "")}»</div>
+      <div class="muted">Остаток · ${stockLabel}</div>
       <div class="big-num" style="margin-top:6px">${fmt(s.stock)} <span style="font-size:18px">${esc(un(it.unit))}</span></div>
     </div>
 
@@ -1542,7 +1578,10 @@ document.addEventListener("click", (e) => {
   }
   // Клик по строке товара (не по кнопке и не по действию) → детали.
   if (itemRow && !t.closest("button") && !t.closest("[data-act]") && itemRow.dataset.item) {
-    sheetItemDetail(itemRow.dataset.item);
+    // Из аналитики карточку открываем в её масштабе: null = все этажи (колонки),
+    // id этажа = сводка по нему. Из прочих экранов scope не задаём — активный этаж.
+    const scope = itemRow.closest("#view-analytics") ? analyticsFloor : undefined;
+    sheetItemDetail(itemRow.dataset.item, { scope });
     return;
   }
 
@@ -1648,6 +1687,12 @@ $("#view-settings").addEventListener("click", (e) => {
 });
 // Аналитика: переключение режима и быстрые диапазоны отчёта.
 $("#view-analytics").addEventListener("click", (e) => {
+  const af = e.target.closest("[data-afloor]");
+  if (af) {
+    analyticsFloor = af.dataset.afloor === "all" ? null : af.dataset.afloor;
+    renderAnalytics();
+    return;
+  }
   const seg = e.target.closest("[data-mode]");
   if (seg) {
     analyticsMode = seg.dataset.mode;

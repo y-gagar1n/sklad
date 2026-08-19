@@ -652,6 +652,28 @@ select:focus {
   font-size: 15px;
 }
 
+/* Режим «все этажи»: карточки этажей идут колонками рядом (по одной на этаж),
+   с горизонтальной прокруткой, если не влезают. Действия скрыты — это обзор. */
+.floor-cols {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 4px;
+}
+.floor-cols > .card {
+  flex: 1 0 240px;
+  min-width: 240px;
+  margin: 0;
+}
+.floor-cols .mv-col-act {
+  display: none;
+}
+.floor-cols .mv-head,
+.floor-cols .mv-row2 {
+  grid-template-columns: 1fr 52px 52px;
+}
+
 /* Поиск */
 .search-row {
   position: relative;
