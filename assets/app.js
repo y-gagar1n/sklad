@@ -384,7 +384,9 @@ function renderItems() {
     floorBar() +
     `<div class="search-row">
       <span class="search-ic">🔍</span>
-      <input id="item-search" type="search" inputmode="search" autocomplete="off"
+      <input id="item-search" type="search" inputmode="search" name="item-search"
+        autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+        data-form-type="other" data-1p-ignore data-lpignore="true" data-bwignore
         placeholder="Поиск товара или категории" value="${esc(itemSearch)}" />
       <button class="icon-btn search-clear" id="search-clear" ${itemSearch ? "" : "hidden"} title="Очистить">✕</button>
     </div>
@@ -532,7 +534,9 @@ function renderEntry() {
     </label>
     <div class="search-row">
       <span class="search-ic">🔍</span>
-      <input id="entry-search" type="search" inputmode="search" autocomplete="off"
+      <input id="entry-search" type="search" inputmode="search" name="entry-search"
+        autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false"
+        data-form-type="other" data-1p-ignore data-lpignore="true" data-bwignore
         placeholder="Поиск товара или категории" value="${esc(entrySearch)}" />
       <button class="icon-btn search-clear" id="entry-search-clear" ${entrySearch ? "" : "hidden"} title="Очистить">✕</button>
     </div>
