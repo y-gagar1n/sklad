@@ -799,3 +799,208 @@ input[type="search"]::-webkit-search-decoration {
   opacity: 1;
   transform: translateX(-50%) translateY(-4px);
 }
+
+/* Бренд в сайдбаре — виден только в десктопной раскладке. */
+.side-brand {
+  display: none;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────
+   Десктопная раскладка. Всё ниже включается только на широком экране —
+   мобильный интерфейс выше не меняется. Нижний таббар превращается в левый
+   сайдбар, шапка и контент сдвигаются вправо, экраны раскладываются
+   в несколько колонок, нижний лист — в модалку по центру.
+   ───────────────────────────────────────────────────────────────────────── */
+:root {
+  --sidebar-w: 240px;
+}
+
+@media (min-width: 900px) and (pointer: fine) {
+  /* Таббар → вертикальный сайдбар слева */
+  .tabbar {
+    top: 0;
+    bottom: 0;
+    left: 0;
+    right: auto;
+    width: var(--sidebar-w);
+    flex-direction: column;
+    justify-content: flex-start;
+    gap: 2px;
+    border-top: none;
+    border-right: 1px solid var(--border);
+    padding: 12px 10px;
+    overflow-y: auto;
+  }
+  .tabbar button {
+    flex: none;
+    flex-direction: row;
+    justify-content: flex-start;
+    gap: 12px;
+    min-height: 44px;
+    padding: 10px 12px;
+    font-size: 15px;
+    border-radius: var(--radius-sm);
+    transition: background 0.12s, color 0.12s;
+  }
+  .tabbar button .ic {
+    font-size: 18px;
+    width: 22px;
+    text-align: center;
+  }
+  .tabbar button:hover {
+    background: var(--surface-2);
+    color: var(--text);
+  }
+  .tabbar button.active {
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    color: var(--accent);
+  }
+
+  .side-brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 12px 14px;
+    font-weight: 800;
+    font-size: 18px;
+    letter-spacing: -0.01em;
+  }
+  .side-logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    display: grid;
+    place-items: center;
+    font-size: 17px;
+  }
+
+  /* Шапка и контент сдвигаются за сайдбар */
+  .app-header {
+    margin-left: var(--sidebar-w);
+    padding-left: 28px;
+    padding-right: 28px;
+  }
+  .app-header h1 {
+    font-size: 24px;
+  }
+  .app-header .subtitle {
+    font-size: 14px;
+  }
+
+  main {
+    margin: 0 0 0 var(--sidebar-w);
+    max-width: 1180px;
+    padding: 24px 32px 48px;
+  }
+
+  /* Метрики обзора — в ряд */
+  .metric-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+
+  /* Обзор — две колонки: «что заказать» шире, категории уже */
+  .ov-cols {
+    display: grid;
+    grid-template-columns: 1.6fr 1fr;
+    gap: 20px;
+    align-items: start;
+  }
+
+  /* Товары — категории-карточки в две колонки (masonry) */
+  #items-list {
+    columns: 2;
+    column-gap: 16px;
+  }
+  #items-list > .card {
+    break-inside: avoid;
+  }
+
+  /* Ввод — карточки категорий сеткой */
+  .entry-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 14px;
+    align-items: start;
+  }
+  .entry-cards > .card {
+    margin-bottom: 0;
+  }
+
+  /* Настройки — две колонки */
+  .settings-cols {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    align-items: start;
+  }
+
+  /* Нижний лист → модалка по центру экрана */
+  .sheet-backdrop {
+    align-items: center;
+  }
+  .sheet {
+    max-width: 520px;
+    border-radius: var(--radius);
+    max-height: 85vh;
+    animation: pop 0.14s ease;
+  }
+  .sheet.sheet-fixed {
+    height: auto;
+    max-height: 85vh;
+  }
+  .sheet .grabber {
+    display: none;
+  }
+  #sheet-content {
+    padding: 8px 24px 24px;
+  }
+  @keyframes pop {
+    from {
+      transform: scale(0.97);
+      opacity: 0;
+    }
+    to {
+      transform: none;
+      opacity: 1;
+    }
+  }
+
+  /* Тост центрируем в области контента, а не всего экрана */
+  .toast {
+    bottom: 24px;
+    left: calc(50% + var(--sidebar-w) / 2);
+  }
+
+  /* Наведение мышью — на десктопе есть курсор */
+  .btn:hover {
+    background: var(--accent-press);
+  }
+  .btn.secondary:hover {
+    background: var(--border);
+  }
+  .btn.danger:hover {
+    filter: brightness(0.97);
+  }
+  .icon-btn:hover {
+    background: var(--border);
+  }
+  .list-item[data-item],
+  .list-item[data-cat-jump],
+  .cat-head[data-cat-toggle] {
+    transition: background 0.1s;
+  }
+  .list-item[data-item]:hover,
+  .list-item[data-cat-jump]:hover,
+  .cat-head[data-cat-toggle]:hover {
+    background: var(--surface-2);
+  }
+  .floor-chip {
+    cursor: pointer;
+  }
+  .floor-chip:hover:not(.on) {
+    border-color: var(--accent);
+    color: var(--text);
+  }
+}

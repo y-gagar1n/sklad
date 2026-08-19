@@ -245,24 +245,24 @@ function renderOverview() {
       </div>
     </div>`;
 
-  html += `<h2 class="section-title">Что заказать</h2>`;
+  // Две колонки на десктопе: слева «что заказать», справа остаток по категориям.
+  // На мобильном .ov-cols — обычный блок, секции идут друг под другом (как раньше).
+  let orderHtml = `<h2 class="section-title">Что заказать</h2>`;
   if (toOrder.length === 0) {
-    html += `<div class="card card-pad" style="text-align:center">
+    orderHtml += `<div class="card card-pad" style="text-align:center">
       <div class="big-emoji" style="font-size:36px">✅</div>
       <div style="font-weight:700;margin-top:6px">Всё в достатке</div>
       <div class="muted" style="margin-top:4px">Ничего заказывать не нужно.</div>
     </div>`;
   } else {
-    html += `<div class="card">`;
-    html += toOrder
-      .map((r) => orderRow(r.it, r.s))
-      .join("");
-    html += `</div>`;
+    orderHtml +=
+      `<div class="card">` +
+      toOrder.map((r) => orderRow(r.it, r.s)).join("") +
+      `</div>`;
   }
 
-  // Остаток по категориям.
-  html += `<h2 class="section-title">Остаток по категориям</h2><div class="card">`;
-  html += cats
+  let catsHtml = `<h2 class="section-title">Остаток по категориям</h2><div class="card">`;
+  catsHtml += cats
     .map((c) => {
       const its = store.itemsOf(c.id);
       const total = its.reduce((sum, it) => sum + store.stockForItem(it.id), 0);
@@ -275,7 +275,9 @@ function renderOverview() {
       </div>`;
     })
     .join("");
-  html += `</div>`;
+  catsHtml += `</div>`;
+
+  html += `<div class="ov-cols"><div class="ov-col">${orderHtml}</div><div class="ov-col">${catsHtml}</div></div>`;
 
   view.innerHTML = html;
 }
@@ -483,6 +485,9 @@ function renderEntry() {
     </label>
     <p class="hint">Приход/расход записываются на выбранный этаж. Нажмите «Приход» или «Расход» у нужного товара.</p>`;
 
+  // На десктопе карточки категорий раскладываются в несколько колонок
+  // (.entry-cards — CSS-сетка); на мобильном это обычный блок в один столбец.
+  html += `<div class="entry-cards">`;
   html += cats
     .map((c) => {
       const its = store.itemsOf(c.id);
@@ -506,6 +511,7 @@ function renderEntry() {
       return `<div class="card">${inner}</div>`;
     })
     .join("");
+  html += `</div>`;
 
   view.innerHTML = html;
 
@@ -746,7 +752,12 @@ function renderSettings() {
       <span class="cat-caret">${settingsCollapsed[key] ? "▸" : "▾"}</span>${title}
       <span class="muted" style="font-weight:400"> · ${count}</span>
     </h2>`;
+  // На десктопе настройки — в две колонки (.settings-cols): слева этажи и
+  // категории, справа рабочие дни, синхронизация и данные. На мобильном
+  // это обычный блок — секции идут одним столбцом, как раньше.
   view.innerHTML = `
+    <div class="settings-cols">
+    <div class="settings-col">
     ${secHead("floors", "Этажи", fl.length)}
     ${
       settingsCollapsed.floors
@@ -787,9 +798,10 @@ function renderSettings() {
     </div>
     <p class="hint">Категории общие для всех этажей. Товары добавляются на экране «Товары».</p>`
     }
+    </div>
 
-    <h2 class="section-title">Рабочие дни</h2>`;
-  view.innerHTML += `
+    <div class="settings-col">
+    <h2 class="section-title">Рабочие дни</h2>
     <div class="card card-pad">
       <p class="hint" style="margin-top:0">Средний расход можно считать только по рабочим дням.</p>
       <div class="weekday-row" id="weekday-row">
@@ -850,6 +862,8 @@ function renderSettings() {
       <button class="btn secondary block" data-act="seed">Загрузить демо-данные</button>
       <div class="spacer"></div>
       <button class="btn danger block" data-act="wipe">Удалить все данные</button>
+    </div>
+    </div>
     </div>
 
     <p class="hint" style="text-align:center;margin-top:20px">Склад · офлайн-приложение · v1</p>
