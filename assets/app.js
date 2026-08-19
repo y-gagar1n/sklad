@@ -1055,6 +1055,11 @@ function sheetItemDetail(id, { scope } = {}) {
   // (сводка по всем + история колонками); id = конкретный этаж.
   const floorColumns = scope === null;
   const summaryScope = scope === undefined ? store.getActiveFloorId() : scope;
+  // Этаж, на который действуют кнопки карточки (приход/расход/инвентаризация/
+  // перенос): конкретный этаж масштаба, иначе активный (для «все этажи» — тоже
+  // активный, но «откуда» в переносе можно сменить).
+  const actionFloorId =
+    typeof scope === "string" ? scope : store.getActiveFloorId();
   const movements = store.movementsForItem(id, summaryScope);
   const s = itemSummary(movements, it, opts);
   const cat = store.getCategory(it.categoryId);
@@ -1130,12 +1135,12 @@ function sheetItemDetail(id, { scope } = {}) {
     </div>
 
     <div class="stepper" style="margin-bottom:12px">
-      <button class="step-btn out" data-mv="out" data-item="${id}">Расход</button>
-      <button class="step-btn in" data-mv="in" data-item="${id}">Приход</button>
+      <button class="step-btn out" data-mv="out" data-item="${id}" data-act-floor="${actionFloorId}">Расход</button>
+      <button class="step-btn in" data-mv="in" data-item="${id}" data-act-floor="${actionFloorId}">Приход</button>
     </div>
-    <button class="btn secondary block" data-act="inventory" data-item="${id}">📋 Инвентаризация (задать остаток)</button>
+    <button class="btn secondary block" data-act="inventory" data-item="${id}" data-act-floor="${actionFloorId}">📋 Инвентаризация (задать остаток)</button>
     <div class="spacer"></div>
-    <button class="btn secondary block" data-act="transfer" data-item="${id}">🔀 Перенести на другой этаж</button>
+    <button class="btn secondary block" data-act="transfer" data-item="${id}" data-act-floor="${actionFloorId}">🔀 Перенести на другой этаж</button>
 
     <h2 class="section-title">Движения по этажам</h2>
     ${historyHtml}
@@ -1165,14 +1170,16 @@ function sheetItemDetail(id, { scope } = {}) {
   );
 }
 
-function sheetMovement(itemId, type) {
+function sheetMovement(itemId, type, floorId) {
   const it = store.getItem(itemId);
   if (!it) return;
+  const fid = floorId || store.getActiveFloorId();
   const isIn = type === "in";
   const presets = [1, 5, 10, 50];
+  const floorName = store.getFloor(fid)?.name || "";
   openSheet(`
     <h3>${isIn ? "Приход" : "Расход"}: ${esc(it.name)}</h3>
-    <div class="muted" style="margin-bottom:14px">Остаток сейчас: ${fmt(store.stockForItem(itemId))} ${esc(un(it.unit))}</div>
+    <div class="muted" style="margin-bottom:14px">Этаж «${esc(floorName)}» · остаток ${fmt(store.stockForItem(itemId, fid))} ${esc(un(it.unit))}</div>
     <label class="field">
       <span class="lbl">Количество (${esc(un(it.unit))})</span>
       <input id="f-qty" type="number" inputmode="decimal" step="any" min="0" placeholder="0" />
@@ -1201,7 +1208,7 @@ function sheetMovement(itemId, type) {
     if (qty <= 0) return toast("Введите количество");
     // Нельзя списать больше, чем есть — остаток не должен уходить в минус.
     if (!isIn) {
-      const stock = store.stockForItem(itemId);
+      const stock = store.stockForItem(itemId, fid);
       if (qty > stock) {
         return toast(`Нельзя списать больше остатка: ${fmt(stock)} ${un(it.unit)}`);
       }
@@ -1210,6 +1217,7 @@ function sheetMovement(itemId, type) {
       type,
       qty,
       date: $("#f-date").value || todayISO(),
+      floorId: fid,
     });
     closeSheet();
     render();
@@ -1256,13 +1264,15 @@ function sheetEditMovement(movementId, itemId) {
   });
 }
 
-function sheetInventory(itemId) {
+function sheetInventory(itemId, floorId) {
   const it = store.getItem(itemId);
   if (!it) return;
-  const cur = store.stockForItem(itemId);
+  const fid = floorId || store.getActiveFloorId();
+  const cur = store.stockForItem(itemId, fid);
+  const floorName = store.getFloor(fid)?.name || "";
   openSheet(`
     <h3>Инвентаризация: ${esc(it.name)}</h3>
-    <div class="muted" style="margin-bottom:14px">Расчётный остаток: ${fmt(cur)} ${esc(un(it.unit))}. Введите фактический — разница запишется в историю.</div>
+    <div class="muted" style="margin-bottom:14px">Этаж «${esc(floorName)}» · расчётный остаток ${fmt(cur)} ${esc(un(it.unit))}. Введите фактический — разница запишется в историю.</div>
     <label class="field">
       <span class="lbl">Фактический остаток (${esc(un(it.unit))})</span>
       <input id="f-qty" type="number" inputmode="decimal" step="any" value="${cur}" />
@@ -1277,20 +1287,18 @@ function sheetInventory(itemId) {
   $('[data-save="inv"]').addEventListener("click", () => {
     const val = parseNum($("#f-qty").value);
     if (val < 0) return toast("Остаток не может быть отрицательным");
-    store.setStock(itemId, val, $("#f-date").value || todayISO());
+    store.setStock(itemId, val, $("#f-date").value || todayISO(), "Инвентаризация", fid);
     closeSheet();
     render();
     toast("Остаток обновлён");
   });
 }
 
-function sheetTransfer(itemId) {
+function sheetTransfer(itemId, fromFloorId) {
   const it = store.getItem(itemId);
   if (!it) return;
-  const fromId = store.getActiveFloorId();
-  const from = store.getFloor(fromId);
-  const others = store.floors().filter((f) => f.id !== fromId);
-  if (!others.length) {
+  const fl = store.floors();
+  if (fl.length < 2) {
     openSheet(`
       <h3>Перенести: ${esc(it.name)}</h3>
       <div class="empty" style="padding:16px 0">
@@ -1302,45 +1310,78 @@ function sheetTransfer(itemId) {
     `);
     return;
   }
-  const cur = store.stockForItem(itemId, fromId);
+  // «Откуда» по умолчанию — этаж масштаба (из аналитики) или активный; «куда» —
+  // первый другой этаж. Оба можно поменять.
+  const defFrom =
+    fromFloorId && store.getFloor(fromFloorId) ? fromFloorId : store.getActiveFloorId();
+  const defTo = (fl.find((f) => f.id !== defFrom) || fl[0]).id;
+  const opt = (f, sel) =>
+    `<option value="${f.id}" ${f.id === sel ? "selected" : ""}>${esc(f.name)}</option>`;
   openSheet(`
     <h3>Перенести: ${esc(it.name)}</h3>
-    <div class="muted" style="margin-bottom:14px">С этажа «${esc(from?.name || "")}» · сейчас ${fmt(cur)} ${esc(un(it.unit))}</div>
-    <label class="field">
-      <span class="lbl">Куда</span>
-      <select id="f-to">
-        ${others.map((f) => `<option value="${f.id}">${esc(f.name)}</option>`).join("")}
-      </select>
-    </label>
+    <div class="row" style="gap:12px">
+      <label class="field grow" style="margin:0"><span class="lbl">Откуда</span>
+        <select id="f-from">${fl.map((f) => opt(f, defFrom)).join("")}</select></label>
+      <label class="field grow" style="margin:0"><span class="lbl">Куда</span>
+        <select id="f-to">${fl.map((f) => opt(f, defTo)).join("")}</select></label>
+    </div>
+    <div class="muted" id="from-info" style="margin:6px 0 14px"></div>
     <label class="field">
       <span class="lbl">Сколько перенести (${esc(un(it.unit))})</span>
       <input id="f-qty" type="number" inputmode="decimal" step="any" min="0" placeholder="0" />
     </label>
-    <div class="row" style="gap:8px;margin-bottom:14px">
-      ${[1, 5, 10].map((p) => `<button class="btn secondary small grow" data-preset="${p}">+${p}</button>`).join("")}
-      <button class="btn secondary small grow" data-preset-all>Все ${fmt(cur)}</button>
-    </div>
+    <div class="row" style="gap:8px;margin-bottom:14px" id="preset-row"></div>
     <button class="btn block" data-save="transfer">🔀 Перенести</button>
   `);
   focusFirst();
+  const fromEl = $("#f-from");
+  const toEl = $("#f-to");
   const qtyEl = $("#f-qty");
-  $$("[data-preset]").forEach((b) =>
-    b.addEventListener("click", () => {
-      qtyEl.value = String(parseNum(qtyEl.value) + Number(b.dataset.preset));
-    }),
-  );
-  $("[data-preset-all]")?.addEventListener("click", () => {
-    qtyEl.value = String(cur);
+  // Обновить подпись остатка и пресеты под выбранный «откуда».
+  const refresh = () => {
+    const cur = store.stockForItem(itemId, fromEl.value);
+    $("#from-info").textContent = `Остаток на «${store.getFloor(fromEl.value)?.name || ""}»: ${fmt(cur)} ${un(it.unit)}`;
+    $("#preset-row").innerHTML =
+      [1, 5, 10]
+        .map((p) => `<button class="btn secondary small grow" data-preset="${p}">+${p}</button>`)
+        .join("") +
+      `<button class="btn secondary small grow" data-preset-all>Все ${fmt(cur)}</button>`;
+    $$("[data-preset]").forEach((b) =>
+      b.addEventListener("click", () => {
+        qtyEl.value = String(parseNum(qtyEl.value) + Number(b.dataset.preset));
+      }),
+    );
+    $("[data-preset-all]")?.addEventListener("click", () => {
+      qtyEl.value = String(store.stockForItem(itemId, fromEl.value));
+    });
+  };
+  refresh();
+  // Этажи «откуда» и «куда» не должны совпадать — при коллизии сдвигаем второй.
+  fromEl.addEventListener("change", () => {
+    if (toEl.value === fromEl.value) {
+      const alt = fl.find((f) => f.id !== fromEl.value);
+      if (alt) toEl.value = alt.id;
+    }
+    refresh();
+  });
+  toEl.addEventListener("change", () => {
+    if (toEl.value === fromEl.value) {
+      const alt = fl.find((f) => f.id !== toEl.value);
+      if (alt) fromEl.value = alt.id;
+      refresh();
+    }
   });
   $('[data-save="transfer"]').addEventListener("click", () => {
     const qty = parseNum(qtyEl.value);
     if (qty <= 0) return toast("Введите количество");
+    const fromId = fromEl.value;
+    const toId = toEl.value;
+    if (fromId === toId) return toast("Этажи «откуда» и «куда» совпадают");
     // Нельзя перенести больше, чем есть на исходном этаже.
     const avail = store.stockForItem(itemId, fromId);
     if (qty > avail) {
       return toast(`Нельзя перенести больше остатка: ${fmt(avail)} ${un(it.unit)}`);
     }
-    const toId = $("#f-to").value;
     const toName = store.getFloor(toId)?.name || "";
     store.transferStock(itemId, fromId, toId, qty, todayISO());
     closeSheet();
@@ -1565,7 +1606,7 @@ document.addEventListener("click", (e) => {
   const itemRow = t.closest("[data-item]");
   const mvBtn = t.closest("[data-mv]");
   if (mvBtn) {
-    sheetMovement(mvBtn.dataset.item, mvBtn.dataset.mv);
+    sheetMovement(mvBtn.dataset.item, mvBtn.dataset.mv, mvBtn.dataset.actFloor);
     return;
   }
 
@@ -1617,10 +1658,16 @@ document.addEventListener("click", (e) => {
     toast("Данные удалены");
     return;
   }
-  if (act === "inventory") return sheetInventory(t.closest("[data-item]").dataset.item);
+  if (act === "inventory") {
+    const el = t.closest("[data-item]");
+    return sheetInventory(el.dataset.item, el.dataset.actFloor);
+  }
   if (act === "edit-item") return sheetEditItem(t.closest("[data-item]").dataset.item);
   if (act === "edit-min") return sheetEditMin(t.closest("[data-item]").dataset.item);
-  if (act === "transfer") return sheetTransfer(t.closest("[data-item]").dataset.item);
+  if (act === "transfer") {
+    const el = t.closest("[data-item]");
+    return sheetTransfer(el.dataset.item, el.dataset.actFloor);
+  }
   if (act === "add-floor") return sheetAddFloor();
 
   const addItemCat = t.closest("[data-add-item]")?.dataset.addItem;
