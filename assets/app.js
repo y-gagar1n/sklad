@@ -71,6 +71,10 @@ function toast(msg) {
 
 // ── Нижний лист (формы) ───────────────────────────────────────────────────
 
+// Замыкание перерисовки текущего листа (для сворачивания списков внутри него,
+// напр. истории движений в карточке товара). Сбрасывается при закрытии.
+let rerenderSheet = null;
+
 function openSheet(html, { fixed = false } = {}) {
   const sheet = $("#sheet");
   sheet.style.transition = "";
@@ -89,6 +93,7 @@ function closeSheet() {
   document.body.style.overflow = "";
   const sheet = $("#sheet");
   sheet.style.transform = "";
+  rerenderSheet = null;
 }
 $("#sheet-backdrop").addEventListener("click", (e) => {
   if (e.target.id === "sheet-backdrop") closeSheet();
@@ -247,35 +252,41 @@ function renderOverview() {
 
   // Две колонки на десктопе: слева «что заказать», справа остаток по категориям.
   // На мобильном .ov-cols — обычный блок, секции идут друг под другом (как раньше).
-  let orderHtml = `<h2 class="section-title">Что заказать</h2>`;
-  if (toOrder.length === 0) {
-    orderHtml += `<div class="card card-pad" style="text-align:center">
-      <div class="big-emoji" style="font-size:36px">✅</div>
-      <div style="font-weight:700;margin-top:6px">Всё в достатке</div>
-      <div class="muted" style="margin-top:4px">Ничего заказывать не нужно.</div>
-    </div>`;
-  } else {
-    orderHtml +=
-      `<div class="card">` +
-      toOrder.map((r) => orderRow(r.it, r.s)).join("") +
-      `</div>`;
+  let orderHtml = sectionHead("ov:order", "Что заказать");
+  if (!isCollapsed("ov:order")) {
+    if (toOrder.length === 0) {
+      orderHtml += `<div class="card card-pad" style="text-align:center">
+        <div class="big-emoji" style="font-size:36px">✅</div>
+        <div style="font-weight:700;margin-top:6px">Всё в достатке</div>
+        <div class="muted" style="margin-top:4px">Ничего заказывать не нужно.</div>
+      </div>`;
+    } else {
+      orderHtml +=
+        `<div class="card">` +
+        toOrder.map((r) => orderRow(r.it, r.s)).join("") +
+        `</div>`;
+    }
   }
 
-  let catsHtml = `<h2 class="section-title">Остаток по категориям</h2><div class="card">`;
-  catsHtml += cats
-    .map((c) => {
-      const its = store.itemsOf(c.id);
-      const total = its.reduce((sum, it) => sum + store.stockForItem(it.id), 0);
-      return `<div class="list-item" data-cat-jump="${c.id}">
-        <div class="grow">
-          <div class="name">${esc(c.name)}</div>
-          <div class="sub">${its.length} поз.</div>
-        </div>
-        <div class="nowrap" style="font-weight:700">${fmt(total)}</div>
-      </div>`;
-    })
-    .join("");
-  catsHtml += `</div>`;
+  let catsHtml = sectionHead("ov:cats", "Остаток по категориям");
+  if (!isCollapsed("ov:cats")) {
+    catsHtml +=
+      `<div class="card">` +
+      cats
+        .map((c) => {
+          const its = store.itemsOf(c.id);
+          const total = its.reduce((sum, it) => sum + store.stockForItem(it.id), 0);
+          return `<div class="list-item" data-cat-jump="${c.id}">
+            <div class="grow">
+              <div class="name">${esc(c.name)}</div>
+              <div class="sub">${its.length} поз.</div>
+            </div>
+            <div class="nowrap" style="font-weight:700">${fmt(total)}</div>
+          </div>`;
+        })
+        .join("") +
+      `</div>`;
+  }
 
   html += `<div class="ov-cols"><div class="ov-col">${orderHtml}</div><div class="ov-col">${catsHtml}</div></div>`;
 
@@ -301,30 +312,66 @@ function orderRow(it, s) {
 
 let itemSearch = "";
 
-// Свёрнутые категории (id). Помним между сессиями в отдельном ключе.
+// ── Сворачивание списков ───────────────────────────────────────────────────
+// Любой список/секцию можно свернуть. Состояние — карта «ключ → свёрнут ли»,
+// хранится между сессиями. Наличие ключа = пользователь трогал секцию явно;
+// отсутствие ключа = поведение по умолчанию (обычно развёрнуто, для некоторых
+// секций настроек — свёрнуто). Ключи с префиксом экрана, чтобы одна и та же
+// категория на разных вкладках сворачивалась независимо.
 const COLLAPSE_KEY = "sklad-collapsed";
-let collapsedCats = new Set(loadCollapsed());
-function loadCollapsed() {
+let collapseState = loadCollapse();
+function loadCollapse() {
   try {
-    return JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "[]");
+    const raw = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "null");
+    // Миграция со старого формата: массив id свёрнутых категорий «Товаров».
+    if (Array.isArray(raw)) {
+      const m = {};
+      for (const id of raw) m["items:" + id] = true;
+      return m;
+    }
+    return raw && typeof raw === "object" ? raw : {};
   } catch {
-    return [];
+    return {};
   }
 }
-function saveCollapsed() {
-  localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...collapsedCats]));
+function saveCollapse() {
+  localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapseState));
+}
+function isCollapsed(key, def = false) {
+  return key in collapseState ? collapseState[key] : def;
+}
+function toggleCollapse(key, def = false) {
+  collapseState[key] = !isCollapsed(key, def);
+  saveCollapse();
 }
 
-// Свёрнутость секций настроек (этажи/категории). По умолчанию свёрнуты;
-// состояние держим только в памяти сессии (при перезагрузке снова свёрнуты).
-const settingsCollapsed = { floors: true, cats: true };
+// Заголовок сворачиваемой секции (h2.section-title). Клик по нему — свернуть.
+function sectionHead(key, title, { def = false, extra = "" } = {}) {
+  const caret = isCollapsed(key, def) ? "▸" : "▾";
+  return `<h2 class="section-title collapser" data-collapse="${esc(key)}"${
+    def ? ' data-collapse-def="1"' : ""
+  } style="cursor:pointer"><span class="cat-caret">${caret}</span>${title}${extra}</h2>`;
+}
+
+// Шапка сворачиваемой карточки-категории (.cat-head). Клик по ней — свернуть.
+// nameHtml/rightHtml — уже экранированное содержимое; extra — доп. кнопки справа.
+function catHead(key, nameHtml, rightHtml = "", { extra = "" } = {}) {
+  const caret = isCollapsed(key) ? "▸" : "▾";
+  return `<div class="cat-head" data-collapse="${esc(key)}">
+    <span class="grow" style="display:flex;align-items:center;min-width:0">
+      <span class="cat-caret">${caret}</span><span class="truncate">${nameHtml}</span>
+    </span>
+    ${rightHtml ? `<span class="cat-stock nowrap">${rightHtml}</span>` : ""}
+    ${extra}
+  </div>`;
+}
 
 // Кнопка «Свернуть все / Развернуть все» — вне поиска и если есть категории.
 function collapseAllRow() {
   if (itemSearch.trim()) return "";
   const cats = store.categories();
   if (!cats.length) return "";
-  const allCollapsed = cats.every((c) => collapsedCats.has(c.id));
+  const allCollapsed = cats.every((c) => isCollapsed("items:" + c.id));
   return `<div style="text-align:right;margin:-4px 0 10px">
     <button class="btn secondary small" data-act="toggle-all-cats">${allCollapsed ? "Развернуть все" : "Свернуть все"}</button>
   </div>`;
@@ -403,14 +450,14 @@ function renderItemsList() {
       const total = its.reduce((sum, it) => sum + store.stockForItem(it.id), 0);
       // Сворачивать можно только вне поиска (в поиске всегда показываем совпадения).
       const canCollapse = !q;
-      const collapsed = canCollapse && collapsedCats.has(c.id);
+      const collapsed = canCollapse && isCollapsed("items:" + c.id);
       const caret = canCollapse
         ? `<span class="cat-caret">${collapsed ? "▸" : "▾"}</span>`
         : "";
       const rightTxt = collapsed
         ? `${fmt(total)} · ${its.length} поз.`
         : `${fmt(total)}${q ? "" : " всего"}`;
-      let inner = `<div class="cat-head" ${canCollapse ? `data-cat-toggle="${c.id}"` : ""}>
+      let inner = `<div class="cat-head" ${canCollapse ? `data-collapse="items:${c.id}"` : ""}>
         <span class="grow" style="display:flex;align-items:center;min-width:0">
           ${caret}<span class="truncate">${esc(c.name)}</span>
         </span>
@@ -460,10 +507,10 @@ function renderItemsList() {
 // ── Экран: Быстрый ввод ───────────────────────────────────────────────────
 
 let entryDate = todayISO();
+let entrySearch = "";
 
 function renderEntry() {
   const view = $("#view-entry");
-  const cats = store.categories();
   const items = store.allItems();
 
   if (items.length === 0) {
@@ -476,48 +523,100 @@ function renderEntry() {
     return;
   }
 
-  let html =
+  view.innerHTML =
     floorBar() +
     `
     <label class="field">
       <span class="lbl">Дата</span>
       <input type="date" id="entry-date" value="${entryDate}" max="${todayISO()}" />
     </label>
-    <p class="hint">Приход/расход записываются на выбранный этаж. Нажмите «Приход» или «Расход» у нужного товара.</p>`;
+    <div class="search-row">
+      <span class="search-ic">🔍</span>
+      <input id="entry-search" type="search" inputmode="search" autocomplete="off"
+        placeholder="Поиск товара или категории" value="${esc(entrySearch)}" />
+      <button class="icon-btn search-clear" id="entry-search-clear" ${entrySearch ? "" : "hidden"} title="Очистить">✕</button>
+    </div>
+    <p class="hint">Приход/расход записываются на выбранный этаж. Нажмите «Приход» или «Расход» у нужного товара.</p>
+    <div id="entry-list"></div>`;
 
-  // На десктопе карточки категорий раскладываются в несколько колонок
-  // (.entry-cards — CSS-сетка); на мобильном это обычный блок в один столбец.
-  html += `<div class="entry-cards">`;
-  html += cats
-    .map((c) => {
-      const its = store.itemsOf(c.id);
-      if (its.length === 0) return "";
-      let inner = `<div class="cat-head"><span>${esc(c.name)}</span></div>`;
-      inner += its
-        .map((it) => {
-          const stock = store.stockForItem(it.id);
-          return `<div class="card-pad" style="border-bottom:1px solid var(--border)">
-            <div class="row between" style="margin-bottom:10px">
-              <div class="grow truncate"><b>${esc(it.name)}</b></div>
-              <div class="muted nowrap">${fmt(stock)} ${esc(un(it.unit))}</div>
-            </div>
-            <div class="stepper">
-              <button class="step-btn out" data-mv="out" data-item="${it.id}">Расход<small>списать со склада</small></button>
-              <button class="step-btn in" data-mv="in" data-item="${it.id}">Приход<small>добавить на склад</small></button>
-            </div>
-          </div>`;
-        })
-        .join("");
-      return `<div class="card">${inner}</div>`;
-    })
-    .join("");
-  html += `</div>`;
-
-  view.innerHTML = html;
+  renderEntryList();
 
   $("#entry-date").addEventListener("change", (e) => {
     entryDate = e.target.value || todayISO();
   });
+  const inp = $("#entry-search");
+  inp.addEventListener("input", (e) => {
+    entrySearch = e.target.value;
+    $("#entry-search-clear").hidden = !entrySearch;
+    renderEntryList(); // обновляем только список — поле ввода и фокус сохраняются
+  });
+  $("#entry-search-clear").addEventListener("click", () => {
+    entrySearch = "";
+    inp.value = "";
+    $("#entry-search-clear").hidden = true;
+    renderEntryList();
+    inp.focus();
+  });
+}
+
+// Карточки категорий для ввода прихода/расхода. Отдельная перерисовка — чтобы
+// при наборе в поиске не терялся фокус. На десктопе .entry-cards — CSS-сетка.
+function renderEntryList() {
+  const list = $("#entry-list");
+  if (!list) return;
+  const cats = store.categories();
+  const q = entrySearch.trim().toLowerCase();
+  let shown = 0;
+
+  const cards = cats
+    .map((c) => {
+      const catMatch = !q || c.name.toLowerCase().includes(q);
+      let its = store.itemsOf(c.id);
+      if (its.length === 0) return "";
+      if (q && !catMatch) {
+        its = its.filter((it) => it.name.toLowerCase().includes(q));
+        if (its.length === 0) return "";
+      }
+      shown++;
+      // Сворачивать можно только вне поиска (в поиске показываем совпадения).
+      const canCollapse = !q;
+      const collapsed = canCollapse && isCollapsed("entry:" + c.id);
+      const caret = canCollapse
+        ? `<span class="cat-caret">${collapsed ? "▸" : "▾"}</span>`
+        : "";
+      let inner = `<div class="cat-head" ${canCollapse ? `data-collapse="entry:${c.id}"` : ""}>
+        <span class="grow" style="display:flex;align-items:center;min-width:0">
+          ${caret}<span class="truncate">${esc(c.name)}</span>
+        </span>
+        <span class="cat-stock nowrap">${its.length} поз.</span>
+      </div>`;
+      if (!collapsed) {
+        inner += its
+          .map((it) => {
+            const stock = store.stockForItem(it.id);
+            return `<div class="card-pad" style="border-bottom:1px solid var(--border)">
+              <div class="row between" style="margin-bottom:10px">
+                <div class="grow truncate"><b>${esc(it.name)}</b></div>
+                <div class="muted nowrap">${fmt(stock)} ${esc(un(it.unit))}</div>
+              </div>
+              <div class="stepper">
+                <button class="step-btn out" data-mv="out" data-item="${it.id}">Расход<small>списать со склада</small></button>
+                <button class="step-btn in" data-mv="in" data-item="${it.id}">Приход<small>добавить на склад</small></button>
+              </div>
+            </div>`;
+          })
+          .join("");
+      }
+      return `<div class="card">${inner}</div>`;
+    })
+    .join("");
+
+  list.innerHTML =
+    shown === 0
+      ? q
+        ? emptyStateInline("🔍", "Ничего не найдено", `По запросу «${esc(entrySearch.trim())}» ничего нет.`)
+        : emptyStateInline("➕", "Нет товаров", "Добавьте товары на вкладке «Товары».")
+      : `<div class="entry-cards">${cards}</div>`;
 }
 
 // ── Экран: Аналитика (Заказать / Отчёт за период) ─────────────────────────
@@ -633,11 +732,10 @@ function analyticsOrder() {
       const catWeek = catRows.reduce((s, r) => s + r.s.weeklyAvg, 0);
       const catMonth = catRows.reduce((s, r) => s + r.s.monthlyAvg, 0);
       const catStock = catRows.reduce((s, r) => s + r.s.stock, 0);
-      let inner = `<div class="cat-head">
-        <span>${esc(c.name)}</span>
-        <span class="cat-stock">ост. ${fmt(catStock)}</span>
-      </div>
-      <div class="card-pad">
+      const collapsed = isCollapsed("an-avg:" + c.id);
+      let inner = catHead("an-avg:" + c.id, esc(c.name), `ост. ${fmt(catStock)}`);
+      if (collapsed) return `<div class="card">${inner}</div>`;
+      inner += `<div class="card-pad">
         <div class="metric-grid">
           <div class="metric"><div class="label">Расход / неделя</div><div class="value">${fmt(catWeek)}</div></div>
           <div class="metric"><div class="label">Расход / месяц</div><div class="value">${fmt(catMonth)}</div></div>
@@ -718,12 +816,12 @@ function analyticsReport() {
       if (!lines.length) return "";
       gIn += cin;
       gOut += cout;
-      return `<div class="card">
-        <div class="cat-head"><span>${esc(c.name)}</span>
-          <span class="cat-stock"><span style="color:var(--in)">${inStr(cin)}</span> · <span style="color:var(--out)">${outStr(cout)}</span></span>
-        </div>
-        <div class="card-pad">${lines.join("")}</div>
-      </div>`;
+      const right = `<span style="color:var(--in)">${inStr(cin)}</span> · <span style="color:var(--out)">${outStr(cout)}</span>`;
+      const head = catHead("an-rep:" + c.id, esc(c.name), right);
+      const body = isCollapsed("an-rep:" + c.id)
+        ? ""
+        : `<div class="card-pad">${lines.join("")}</div>`;
+      return `<div class="card">${head}${body}</div>`;
     })
     .join("");
 
@@ -747,11 +845,15 @@ function renderSettings() {
 
   const fl = store.floors();
   const cats = store.categories();
+  // Этажи и категории по умолчанию свёрнуты (компактные настройки), остальные —
+  // развёрнуты. Состояние помним между сессиями.
   const secHead = (key, title, count) =>
-    `<h2 class="section-title collapser" data-settings-toggle="${key}" style="cursor:pointer">
-      <span class="cat-caret">${settingsCollapsed[key] ? "▸" : "▾"}</span>${title}
-      <span class="muted" style="font-weight:400"> · ${count}</span>
-    </h2>`;
+    sectionHead("set:" + key, title, {
+      def: key === "floors" || key === "cats",
+      extra:
+        count == null ? "" : `<span class="muted" style="font-weight:400"> · ${count}</span>`,
+    });
+  const secOpen = (key) => !isCollapsed("set:" + key, key === "floors" || key === "cats");
   // На десктопе настройки — в две колонки (.settings-cols): слева этажи и
   // категории, справа рабочие дни, синхронизация и данные. На мобильном
   // это обычный блок — секции идут одним столбцом, как раньше.
@@ -760,7 +862,7 @@ function renderSettings() {
     <div class="settings-col">
     ${secHead("floors", "Этажи", fl.length)}
     ${
-      settingsCollapsed.floors
+      !secOpen("floors")
         ? ""
         : `<div class="card">
       ${fl
@@ -779,7 +881,7 @@ function renderSettings() {
 
     ${secHead("cats", "Категории", cats.length)}
     ${
-      settingsCollapsed.cats
+      !secOpen("cats")
         ? ""
         : `<div class="card">
       ${
@@ -801,8 +903,11 @@ function renderSettings() {
     </div>
 
     <div class="settings-col">
-    <h2 class="section-title">Рабочие дни</h2>
-    <div class="card card-pad">
+    ${secHead("workdays", "Рабочие дни")}
+    ${
+      !secOpen("workdays")
+        ? ""
+        : `<div class="card card-pad">
       <p class="hint" style="margin-top:0">Средний расход можно считать только по рабочим дням.</p>
       <div class="weekday-row" id="weekday-row">
         ${order
@@ -827,10 +932,14 @@ function renderSettings() {
             .join("")}
         </select>
       </label>
-    </div>
+    </div>`
+    }
 
-    <h2 class="section-title">Синхронизация между устройствами</h2>
-    <div class="card card-pad">
+    ${secHead("sync", "Синхронизация между устройствами")}
+    ${
+      !secOpen("sync")
+        ? ""
+        : `<div class="card card-pad">
       <p class="hint" style="margin-top:0">Общие данные для телефона и ноутбука. Введите один и тот же адрес сервера и токен на всех устройствах.</p>
       <label class="field">
         <span class="lbl">Адрес сервера</span>
@@ -847,10 +956,14 @@ function renderSettings() {
       <div class="divider"></div>
       <p class="hint" style="margin-top:0">Второе устройство (чтобы забрать данные с сервера, стерев локальные):</p>
       <button class="btn secondary block" data-act="sync-pull">⬇️ Заменить локальные данными с сервера</button>
-    </div>
+    </div>`
+    }
 
-    <h2 class="section-title">Данные</h2>
-    <div class="card card-pad">
+    ${secHead("data", "Данные")}
+    ${
+      !secOpen("data")
+        ? ""
+        : `<div class="card card-pad">
       <p class="hint" style="margin-top:0">Данные хранятся в этом браузере на устройстве. Делайте резервную копию и переносите на другой телефон через файл.</p>
       <button class="btn block" data-act="export">⬇️ Сохранить копию (файл)</button>
       <div class="spacer"></div>
@@ -862,7 +975,8 @@ function renderSettings() {
       <button class="btn secondary block" data-act="seed">Загрузить демо-данные</button>
       <div class="spacer"></div>
       <button class="btn danger block" data-act="wipe">Удалить все данные</button>
-    </div>
+    </div>`
+    }
     </div>
     </div>
 
@@ -973,8 +1087,8 @@ function sheetCreateItem({ name = "", categoryId = null } = {}) {
       unit: $("#f-unit").value.trim() || "шт",
       minStock: parseNum($("#f-min").value),
     });
-    collapsedCats.delete(cid);
-    saveCollapsed();
+    collapseState["items:" + cid] = false;
+    saveCollapse();
     closeSheet();
     render();
     sheetItemDetail(it.id); // сразу открываем карточку — внести приход
@@ -1064,6 +1178,13 @@ function mvRow2(m) {
 function sheetItemDetail(id, { scope } = {}) {
   const it = store.getItem(id);
   if (!it) return;
+  // Перерисовка листа (для сворачивания истории движений) с сохранением скролла.
+  rerenderSheet = () => {
+    const y = $("#sheet-content")?.scrollTop || 0;
+    sheetItemDetail(id, { scope });
+    const sc = $("#sheet-content");
+    if (sc) sc.scrollTop = y;
+  };
   const opts = store.calcOpts();
   // scope: undefined = активный этаж (обычное открытие); null = все этажи
   // (сводка по всем + история колонками); id = конкретный этаж.
@@ -1093,6 +1214,9 @@ function sheetItemDetail(id, { scope } = {}) {
     .filter((x) => x.mv.length);
   const floorCards = floorsWithMv
     .map(({ f, mv }) => {
+      const right = `ост. ${fmt(store.stockForItem(id, f.id))} ${esc(un(it.unit))}`;
+      const head = catHead("mv:" + f.id, esc(f.name), right);
+      if (isCollapsed("mv:" + f.id)) return `<div class="card">${head}</div>`;
       const rows = [...mv]
         .reverse()
         .slice(0, PER_FLOOR)
@@ -1103,7 +1227,7 @@ function sheetItemDetail(id, { scope } = {}) {
           ? `<div class="card-pad muted">…и ещё ${mv.length - PER_FLOOR}</div>`
           : "";
       return `<div class="card">
-            <div class="cat-head"><span>${esc(f.name)}</span><span class="cat-stock">ост. ${fmt(store.stockForItem(id, f.id))} ${esc(un(it.unit))}</span></div>
+            ${head}
             <div class="mv-head">
               <span>Дата</span>
               <span class="mv-col-num" style="color:var(--in)">Приход</span>
@@ -1652,9 +1776,9 @@ document.addEventListener("click", (e) => {
   }
   if (act === "toggle-all-cats") {
     const cats = store.categories();
-    if (cats.every((c) => collapsedCats.has(c.id))) collapsedCats.clear();
-    else cats.forEach((c) => collapsedCats.add(c.id));
-    saveCollapsed();
+    const collapse = !cats.every((c) => isCollapsed("items:" + c.id));
+    cats.forEach((c) => (collapseState["items:" + c.id] = collapse));
+    saveCollapse();
     render();
     return;
   }
@@ -1690,13 +1814,13 @@ document.addEventListener("click", (e) => {
   const editCat = t.closest("[data-edit-cat]")?.dataset.editCat;
   if (editCat) return sheetEditCategory(editCat);
 
-  // Свернуть/развернуть категорию (клик по её шапке, но не по кнопке ✎).
-  const catToggle = t.closest("[data-cat-toggle]")?.dataset.catToggle;
-  if (catToggle) {
-    if (collapsedCats.has(catToggle)) collapsedCats.delete(catToggle);
-    else collapsedCats.add(catToggle);
-    saveCollapsed();
-    render();
+  // Свернуть/развернуть любой список (клик по его шапке, но не по кнопкам внутри —
+  // те перехватываются выше). Внутри карточки товара перерисовываем сам лист.
+  const collapseEl = t.closest("[data-collapse]");
+  if (collapseEl) {
+    toggleCollapse(collapseEl.dataset.collapse, collapseEl.dataset.collapseDef === "1");
+    if (collapseEl.closest("#sheet-content") && rerenderSheet) rerenderSheet();
+    else render();
     return;
   }
 
@@ -1715,13 +1839,6 @@ $("#view-settings").addEventListener("change", (e) => {
   }
 });
 $("#view-settings").addEventListener("click", (e) => {
-  const stg = e.target.closest("[data-settings-toggle]");
-  if (stg) {
-    const k = stg.dataset.settingsToggle;
-    settingsCollapsed[k] = !settingsCollapsed[k];
-    render();
-    return;
-  }
   const fe = e.target.closest("[data-floor-edit]");
   if (fe) return sheetRenameFloor(fe.dataset.floorEdit);
   const fd = e.target.closest("[data-floor-del]");
