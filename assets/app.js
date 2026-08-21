@@ -199,10 +199,13 @@ function floorBar() {
 
 function renderOverview() {
   const view = $("#view-overview");
-  const cats = store.categories();
-  const items = store.allItems();
+  // Пусто ли приложение — по глобальному списку; отображение фильтруем по
+  // видимости на активном этаже (скрытые на этаже категории не показываем).
+  const allGlobal = store.allItems();
+  const cats = store.categoriesForFloor();
+  const items = store.allItemsForFloor();
 
-  if (items.length === 0) {
+  if (allGlobal.length === 0) {
     view.innerHTML = emptyState(
       "📦",
       "Пока пусто",
@@ -395,7 +398,7 @@ function renderItems() {
       <button class="icon-btn search-clear" id="search-clear" ${itemSearch ? "" : "hidden"} title="Очистить">✕</button>
     </div>
     <button class="btn block" data-act="add-item-global">＋ Товар</button>
-    ${itemSearch.trim() ? "" : collapseAllRow(store.categories().map((c) => "items:" + c.id))}
+    ${itemSearch.trim() ? "" : collapseAllRow(store.categoriesForFloor().map((c) => "items:" + c.id))}
     <div id="items-list"></div>`;
 
   renderItemsList();
@@ -420,7 +423,7 @@ function renderItems() {
 function renderItemsList() {
   const list = $("#items-list");
   if (!list) return;
-  const cats = store.categories();
+  const cats = store.categoriesForFloor();
 
   if (cats.length === 0) {
     list.innerHTML = emptyStateInline(
@@ -476,6 +479,7 @@ function renderItemsList() {
         </span>
         <span class="cat-stock nowrap">${rightTxt}</span>
         <button class="icon-btn cat-edit" data-add-item="${c.id}" title="Добавить товар">＋</button>
+        <button class="icon-btn cat-del" data-del-cat="${c.id}" title="Убрать категорию с этажа">🗑️</button>
       </div>`;
 
       if (!collapsed) {
@@ -505,16 +509,32 @@ function renderItemsList() {
     })
     .join("");
 
-  list.innerHTML =
-    shown === 0
-      ? q
-        ? emptyStateInline("🔍", "Ничего не найдено", `По запросу «${esc(itemSearch.trim())}» ничего нет.`)
-        : emptyStateInline(
-            "📦",
-            "Нет товаров",
-            "Добавьте товар кнопкой «＋ Товар» выше.",
-          )
-      : html;
+  const hiddenCats = q ? [] : store.hiddenCategoriesForFloor();
+  const restoreHtml = hiddenCats.length ? hiddenCatsSection(hiddenCats) : "";
+
+  const emptyHtml = q
+    ? emptyStateInline("🔍", "Ничего не найдено", `По запросу «${esc(itemSearch.trim())}» ничего нет.`)
+    : hiddenCats.length
+      ? "" // на этаже остались только скрытые категории — покажем блок ниже
+      : emptyStateInline("📦", "Нет товаров", "Добавьте товар кнопкой «＋ Товар» выше.");
+
+  list.innerHTML = (shown === 0 ? emptyHtml : html) + restoreHtml;
+}
+
+// Блок «Скрытые категории» на вкладке Товары: категории, убранные с текущего
+// этажа. «Вернуть» показывает категорию снова (товары на этаже остаются пустыми).
+function hiddenCatsSection(cats) {
+  const rows = cats
+    .map(
+      (c) => `<div class="list-item">
+        <div class="grow"><div class="name">${esc(c.name)}</div>
+          <div class="sub">${store.itemsOf(c.id).length} поз. · скрыта на этом этаже</div></div>
+        <button class="btn secondary small" data-restore-cat="${c.id}">Вернуть</button>
+      </div>`,
+    )
+    .join("");
+  return `<h2 class="section-title" style="margin-top:18px">Скрытые категории</h2>
+    <div class="card">${rows}</div>`;
 }
 
 // ── Экран: Быстрый ввод ───────────────────────────────────────────────────
@@ -557,7 +577,7 @@ function renderEntry() {
         ? ""
         : collapseAllRow(
             store
-              .categories()
+              .categoriesForFloor()
               .filter((c) => store.itemsOf(c.id).length)
               .map((c) => "entry:" + c.id),
           )
@@ -589,7 +609,7 @@ function renderEntry() {
 function renderEntryList() {
   const list = $("#entry-list");
   if (!list) return;
-  const cats = store.categories();
+  const cats = store.categoriesForFloor();
   const q = entrySearch.trim().toLowerCase();
   let shown = 0;
 
@@ -712,7 +732,7 @@ function renderAnalytics() {
 // Список заказа: что и сколько заказать, по позициям (единицы разные — не суммируем).
 function analyticsOrder() {
   const opts = store.calcOpts();
-  const cats = store.categories();
+  const cats = analyticsFloor ? store.categoriesForFloor(analyticsFloor) : store.categories();
   const st = store.getSettings();
   const modeTxt = st.workingDaysOnly ? "по рабочим дням" : "по всем дням";
   const rows = store
@@ -799,7 +819,7 @@ function analyticsOrder() {
 
 // Отчёт за период: приход и расход по каждому товару и категории за диапазон дат.
 function analyticsReport() {
-  const cats = store.categories();
+  const cats = analyticsFloor ? store.categoriesForFloor(analyticsFloor) : store.categories();
   const from = reportFrom;
   const to = reportTo;
   const inStr = (n) => (n ? "＋" + fmt(n) : "0");
@@ -1848,6 +1868,35 @@ document.addEventListener("click", (e) => {
 
   const editCat = t.closest("[data-edit-cat]")?.dataset.editCat;
   if (editCat) return sheetEditCategory(editCat);
+
+  // Убрать категорию с текущего этажа: скрыть её из отображения этого этажа.
+  // Движения не трогаем — на других этажах и в глобальном списке категория
+  // остаётся, при возврате история видна как была. Полное удаление со всех
+  // этажей — в «Ещё → Категории».
+  const delCat = t.closest("[data-del-cat]")?.dataset.delCat;
+  if (delCat) {
+    const c = store.getCategory(delCat);
+    const fname = store.getActiveFloor()?.name || "";
+    if (
+      c &&
+      confirm(
+        `Убрать категорию «${c.name}» с этажа «${fname}»? Она скроется на этом этаже; на других этажах и её история сохранятся. Вернуть можно ниже в списке.`,
+      )
+    ) {
+      store.hideCategoryOnFloor(delCat);
+      render();
+      toast("Категория убрана с этажа");
+    }
+    return;
+  }
+
+  const restoreCat = t.closest("[data-restore-cat]")?.dataset.restoreCat;
+  if (restoreCat) {
+    store.unhideCategoryOnFloor(restoreCat);
+    render();
+    toast("Категория возвращена на этаж");
+    return;
+  }
 
   // Свернуть/развернуть любой список (клик по его шапке, но не по кнопкам внутри —
   // те перехватываются выше). Внутри карточки товара перерисовываем сам лист.

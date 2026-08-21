@@ -398,7 +398,8 @@ button {
   width: 12px;
   flex: none;
 }
-.cat-edit {
+.cat-edit,
+.cat-del {
   width: 36px;
   height: 36px;
   font-size: 15px;
@@ -406,6 +407,9 @@ button {
   color: var(--text-dim);
   flex: none;
   margin-left: 6px;
+}
+.cat-del {
+  margin-left: 2px;
 }
 
 /* Поля ввода */

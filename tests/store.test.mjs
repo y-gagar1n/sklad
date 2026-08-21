@@ -100,6 +100,56 @@ test("последний этаж удалить нельзя, а лишний �
   assert.equal(store.floors().length, 1);
 });
 
+test("скрытие категории на этаже: прячет её, но движения и остаток сохраняются", () => {
+  fresh();
+  const c = store.addCategory("Напитки");
+  const water = store.addItem(c.id, { name: "Вода", unit: "л" });
+  const other = store.addCategory("Бакалея");
+  const flour = store.addItem(other.id, { name: "Мука", unit: "кг" });
+  const f1 = store.getActiveFloorId();
+  const f2 = store.addFloor("Этаж 2");
+  store.addMovement(water.id, { type: "in", qty: 10 }); // f1
+  store.addMovement(water.id, { type: "in", qty: 7, floorId: f2.id });
+  store.addMovement(flour.id, { type: "in", qty: 3 }); // f1
+
+  assert.equal(store.hideCategoryOnFloor(c.id, f1), true);
+
+  // На f1 категория скрыта из отображения, но остаток/движения НЕ тронуты.
+  assert.ok(!store.categoriesForFloor(f1).some((x) => x.id === c.id));
+  assert.equal(store.stockForItem(water.id, f1), 10);
+  assert.equal(store.stockForItem(water.id, f2.id), 7);
+  assert.ok(store.categoriesForFloor(f2.id).some((x) => x.id === c.id));
+  assert.ok(store.getCategory(c.id)); // глобально категория существует
+  assert.ok(store.getItem(water.id)); // товар существует
+
+  // Соседняя категория на f1 не затронута.
+  assert.ok(store.categoriesForFloor(f1).some((x) => x.id === other.id));
+  assert.equal(store.stockForItem(flour.id, f1), 3);
+
+  // hiddenCategoriesForFloor показывает её только на f1.
+  assert.deepEqual(store.hiddenCategoriesForFloor(f1).map((x) => x.id), [c.id]);
+  assert.equal(store.hiddenCategoriesForFloor(f2.id).length, 0);
+
+  // Повторное скрытие — уже скрыта, ничего не меняем.
+  assert.equal(store.hideCategoryOnFloor(c.id, f1), false);
+});
+
+test("возврат скрытой категории на этаж: снова видна, история и остаток на месте", () => {
+  fresh();
+  const c = store.addCategory("Напитки");
+  const water = store.addItem(c.id, { name: "Вода", unit: "л" });
+  const f1 = store.getActiveFloorId();
+  store.addMovement(water.id, { type: "in", qty: 10 });
+
+  store.hideCategoryOnFloor(c.id, f1);
+  assert.equal(store.unhideCategoryOnFloor(c.id, f1), true);
+
+  assert.ok(store.categoriesForFloor(f1).some((x) => x.id === c.id));
+  assert.equal(store.stockForItem(water.id, f1), 10); // движения не трогались
+  assert.equal(store.movementsForItem(water.id, f1).length, 1); // история цела
+  assert.equal(store.unhideCategoryOnFloor(c.id, f1), false); // уже не скрыта
+});
+
 test("импорт из Excel: движения переносятся с датами, остаток сходится", () => {
   // Как у нутеллы в реальном файле: приход/расход по дням, «Итого остаток» = 6.
   store.importFromParsed(

@@ -58,7 +58,7 @@ function defaultState() {
 const COLLS = {
   categories: ["name", "order"],
   items: ["categoryId", "name", "unit", "minStock", "order"],
-  floors: ["name", "order"],
+  floors: ["name", "order", "hiddenCats"],
   movements: ["itemId", "floorId", "date", "type", "qty", "adjust", "transfer", "note"],
 };
 
@@ -183,6 +183,33 @@ export function getItem(id) {
 
 export function getCategory(id) {
   return state.categories.find((c) => c.id === id && !c.deleted) || null;
+}
+
+// ── Видимость категорий на этаже (per-floor) ───────────────────────────────
+// Категории и товары общие для всех этажей, но категорию можно скрыть на
+// конкретном этаже. id скрытых категорий лежат в floor.hiddenCats.
+
+export function hiddenCatIds(floorId = state.activeFloorId) {
+  const f = state.floors.find((x) => x.id === floorId && !x.deleted);
+  return new Set(Array.isArray(f?.hiddenCats) ? f.hiddenCats : []);
+}
+
+// Категории, видимые на этаже: живые и не скрытые на этом этаже.
+export function categoriesForFloor(floorId = state.activeFloorId) {
+  const hidden = hiddenCatIds(floorId);
+  return categories().filter((c) => !hidden.has(c.id));
+}
+
+// Товары видимых на этаже категорий.
+export function allItemsForFloor(floorId = state.activeFloorId) {
+  const hidden = hiddenCatIds(floorId);
+  return allItems().filter((i) => !hidden.has(i.categoryId));
+}
+
+// Скрытые на этаже (но ещё существующие) категории — для восстановления в UI.
+export function hiddenCategoriesForFloor(floorId = state.activeFloorId) {
+  const hidden = hiddenCatIds(floorId);
+  return categories().filter((c) => hidden.has(c.id));
 }
 
 export function movementsForItem(id, floorId = state.activeFloorId) {
@@ -339,6 +366,34 @@ export function deleteCategory(id) {
     c.updatedAt = t;
   }
   persist();
+}
+
+// Скрыть категорию на этаже: убрать её из отображения этого этажа. Движения и
+// остаток НЕ трогаем (скрытие обратимо) — на других этажах и в глобальном
+// списке категория тоже остаётся. Возврат вернёт историю как была.
+export function hideCategoryOnFloor(categoryId, floorId = state.activeFloorId) {
+  const f = state.floors.find((x) => x.id === floorId && !x.deleted);
+  if (!f) return false;
+  const set = new Set(Array.isArray(f.hiddenCats) ? f.hiddenCats : []);
+  if (set.has(categoryId)) return false;
+  set.add(categoryId);
+  f.hiddenCats = [...set];
+  f.updatedAt = now();
+  persist();
+  return true;
+}
+
+// Вернуть скрытую категорию на этаж. Движения не трогались при скрытии, поэтому
+// остаток и история товаров на этаже снова видны как были.
+export function unhideCategoryOnFloor(categoryId, floorId = state.activeFloorId) {
+  const f = state.floors.find((x) => x.id === floorId && !x.deleted);
+  if (!f || !Array.isArray(f.hiddenCats)) return false;
+  const next = f.hiddenCats.filter((id) => id !== categoryId);
+  if (next.length === f.hiddenCats.length) return false;
+  f.hiddenCats = next;
+  f.updatedAt = now();
+  persist();
+  return true;
 }
 
 // ── Товары (подкатегории) ─────────────────────────────────────────────────

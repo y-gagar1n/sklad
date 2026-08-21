@@ -120,6 +120,30 @@ test("applyServerRecords: LWW и тумбстоуны", () => {
   assert.equal(store.getCategory(c.id), null);
 });
 
+test("hiddenCats этажа синкается: поле в payload и мёржится по LWW", () => {
+  fresh();
+  const c = store.addCategory("Напитки");
+  const f1 = store.getActiveFloorId();
+  store.hideCategoryOnFloor(c.id, f1);
+
+  // Поле уходит в payload записи этажа.
+  const per = store.exportRecords();
+  const frec = per.floors.find((r) => r.id === f1);
+  assert.deepEqual(frec.data.hiddenCats, [c.id]);
+
+  // Более свежая серверная запись без hiddenCats — категория снова видна (LWW).
+  store.applyServerRecords({
+    floors: [{ id: f1, updatedAt: Date.now() + 5000, deleted: false, data: { name: "Этаж 1", order: 0 } }],
+  });
+  assert.ok(store.categoriesForFloor(f1).some((x) => x.id === c.id));
+
+  // Ещё более свежая серверная запись со скрытием — категория снова скрыта.
+  store.applyServerRecords({
+    floors: [{ id: f1, updatedAt: Date.now() + 9000, deleted: false, data: { name: "Этаж 1", order: 0, hiddenCats: [c.id] } }],
+  });
+  assert.ok(!store.categoriesForFloor(f1).some((x) => x.id === c.id));
+});
+
 test("replaceFromServerRecords: пересборка из серверных id", () => {
   fresh();
   store.replaceFromServerRecords({
