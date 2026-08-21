@@ -162,36 +162,6 @@ test("импорт из Excel: ненулевой остаток на начал
   assert.equal(open.date, "2026-08-09");
 });
 
-test("itemsInStockOf / categoryHasStock: нулевые товары и пустые категории", () => {
-  fresh();
-  const c = store.addCategory("Молоко");
-  const a = store.addItem(c.id, { name: "Коровье", unit: "л" });
-  const b = store.addItem(c.id, { name: "Козье", unit: "л" });
-  store.addMovement(a.id, { type: "in", qty: 5 });
-  // b без движений → остаток 0 → скрыт; a виден.
-  assert.deepEqual(
-    store.itemsInStockOf(c.id).map((i) => i.name),
-    ["Коровье"],
-  );
-  assert.equal(store.categoryHasStock(c.id), true);
-
-  // Спишем весь остаток a → категория становится пустой.
-  store.addMovement(a.id, { type: "out", qty: 5 });
-  assert.deepEqual(store.itemsInStockOf(c.id), []);
-  assert.equal(store.categoryHasStock(c.id), false);
-});
-
-test("categoryHasStock: остаток считается по этажу", () => {
-  fresh();
-  const c = store.addCategory("Молоко");
-  const it = store.addItem(c.id, { name: "Коровье", unit: "л" });
-  const f1 = store.getActiveFloorId();
-  const f2 = store.addFloor("Этаж 2");
-  store.addMovement(it.id, { type: "in", qty: 3, floorId: f1 });
-  assert.equal(store.categoryHasStock(c.id, f1), true);
-  assert.equal(store.categoryHasStock(c.id, f2.id), false); // на этаже 2 пусто
-});
-
 test("updateMovement: правит количество/дату и меняет остаток", () => {
   fresh();
   const c = store.addCategory("Молоко");

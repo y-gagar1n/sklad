@@ -448,9 +448,16 @@ function renderItemsList() {
           if (its.length === 0) return ""; // категория не подходит и товаров нет
         }
       } else {
-        // Без поиска: прячем товары с нулевым остатком и пустые категории.
-        its = store.itemsInStockOf(c.id);
+        // Без поиска показываем все товары категории (пустая — скрыта целиком),
+        // но нулевые остатки не прячем, а опускаем в конец списка.
+        its = store.itemsOf(c.id);
         if (its.length === 0) return "";
+        its = its
+          .map((it, idx) => ({ it, idx, stock: store.stockForItem(it.id) }))
+          .sort((a, b) =>
+            a.stock > 0 === b.stock > 0 ? a.idx - b.idx : a.stock > 0 ? -1 : 1,
+          )
+          .map((x) => x.it);
       }
       shown++;
       const total = its.reduce((sum, it) => sum + store.stockForItem(it.id), 0);
@@ -504,8 +511,8 @@ function renderItemsList() {
         ? emptyStateInline("🔍", "Ничего не найдено", `По запросу «${esc(itemSearch.trim())}» ничего нет.`)
         : emptyStateInline(
             "📦",
-            "Нет товаров в наличии",
-            "Показаны только товары с остатком. Пустые ищите через поиск.",
+            "Нет товаров",
+            "Добавьте товар кнопкой «＋ Товар» выше.",
           )
       : html;
 }

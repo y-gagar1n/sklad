@@ -198,18 +198,6 @@ export function stockForItem(id, floorId = state.activeFloorId) {
   return stockOf(movementsForItem(id, floorId));
 }
 
-// Товары категории с положительным остатком на этаже. На экране «Товары»
-// нулевые прячем (их всё ещё находит поиск — это делает View).
-export function itemsInStockOf(categoryId, floorId = state.activeFloorId) {
-  return itemsOf(categoryId).filter((it) => stockForItem(it.id, floorId) > 0);
-}
-
-// Есть ли в категории хоть один товар с остатком на этаже. Если нет —
-// категория на экране «Товары» скрывается целиком.
-export function categoryHasStock(categoryId, floorId = state.activeFloorId) {
-  return itemsOf(categoryId).some((it) => stockForItem(it.id, floorId) > 0);
-}
-
 // ── Этажи ────────────────────────────────────────────────────────────────
 
 export function floors() {
