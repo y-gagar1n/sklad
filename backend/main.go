@@ -7,6 +7,7 @@
 //
 // Деплой: автоматически по пушу в backend/** (воркфлоу
 // .github/workflows/deploy-backend.yml) либо вручную ./deploy-sklad.sh.
+// deploy test
 //
 // Фронт может лежать и на другом origin (например, GitHub Pages
 // https://y-gagar1n.github.io/sklad/) — тогда браузеру нужен CORS. Разрешённые
