@@ -1031,7 +1031,7 @@ function renderSettings() {
     </div>
     </div>
 
-    <p class="hint" style="text-align:center;margin-top:20px">Склад · офлайн-приложение · v1</p>
+    <p class="hint" style="text-align:center;margin-top:20px">Склад · офлайн-приложение · v1.1</p>
   `;
 }
 
