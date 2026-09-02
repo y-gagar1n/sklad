@@ -313,6 +313,11 @@ select[disabled] {
   color: var(--text-dim);
   flex: none;
 }
+/* display у .badge перебивает UA-правило [hidden]{display:none} — без этого
+   бейдж виден всегда, чем бы ни был выставлен атрибут (ср. .icon-btn[hidden]). */
+.badge[hidden] {
+  display: none !important;
+}
 .dot {
   width: 10px;
   height: 10px;
