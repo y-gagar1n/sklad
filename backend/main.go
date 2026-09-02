@@ -27,8 +27,11 @@
 // Токен отображается на стабильную метку тенанта (tenantId) через -tokens-file
 // (строки "tenantId: token"); у каждого тенанта свой файл данных <data-dir>/<id>.json
 // и свой seq — токен A не видит данные токена B. Токен — лишь ключ к метке, поэтому
-// его ротация не теряет склад. Fallback: если файла нет, но задан env
-// SKLAD_SYNC_TOKEN — единственный тенант "default" (прежнее поведение). /health открыт.
+// его ротация не теряет склад. Строка "tenantId: token ro" даёт read-only токен:
+// pull (since=...) работает, а push (непустые коллекции в запросе) и /wipe отдают
+// 403 — свой набор токенов на тенанта, полноценные и read-only не смешиваются в
+// одной строке. Fallback: если файла нет, но задан env SKLAD_SYNC_TOKEN —
+// единственный тенант "default", read-write (прежнее поведение). /health открыт.
 //
 // TLS: если задан -acme-domain (или env SKLAD_ACME_DOMAIN) — сервер сам получает
 // и продлевает валидный сертификат Let's Encrypt (TLS-ALPN-01 на :443), домена
@@ -194,6 +197,16 @@ type syncRequest struct {
 	Collections map[string][]Record `json:"-"`
 }
 
+// hasIncoming — есть ли в запросе хоть одна запись на запись (для read-only guard).
+func (r *syncRequest) hasIncoming() bool {
+	for _, name := range collectionNames {
+		if len(r.Collections[name]) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Плоский JSON: {since, categories:[], items:[], ...}. Разбираем вручную, чтобы
 // коллекции лежали на верхнем уровне, а не во вложенном объекте.
 func (r *syncRequest) UnmarshalJSON(b []byte) error {
@@ -219,8 +232,8 @@ func (r *syncRequest) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
-func writeSyncResponse(w http.ResponseWriter, seq int64, per map[string][]Record) error {
-	out := map[string]any{"seq": seq}
+func writeSyncResponse(w http.ResponseWriter, seq int64, readOnly bool, per map[string][]Record) error {
+	out := map[string]any{"seq": seq, "readOnly": readOnly}
 	for _, name := range collectionNames {
 		recs := per[name]
 		if recs == nil {
@@ -232,7 +245,7 @@ func writeSyncResponse(w http.ResponseWriter, seq int64, per map[string][]Record
 	return json.NewEncoder(w).Encode(out)
 }
 
-func (s *Store) handleSync(w http.ResponseWriter, r *http.Request) {
+func (s *Store) handleSync(readOnly bool, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -240,6 +253,10 @@ func (s *Store) handleSync(w http.ResponseWriter, r *http.Request) {
 	var req syncRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<20)).Decode(&req); err != nil {
 		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if readOnly && req.hasIncoming() {
+		http.Error(w, "read-only токен: запись запрещена", http.StatusForbidden)
 		return
 	}
 
@@ -269,16 +286,20 @@ func (s *Store) handleSync(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.Printf("sync %s: since=%d accepted=%d seq=%d", r.RemoteAddr, req.Since, accepted, s.state.Seq)
-	if err := writeSyncResponse(w, s.state.Seq, per); err != nil {
+	if err := writeSyncResponse(w, s.state.Seq, readOnly, per); err != nil {
 		log.Printf("ошибка ответа: %v", err)
 	}
 }
 
 // handleWipe тумбстоунит все записи; updatedAt = max(now, existing+1), чтобы
 // тумбстоун побеждал по LWW даже при свежих pending-правках клиента.
-func (s *Store) handleWipe(w http.ResponseWriter, r *http.Request) {
+func (s *Store) handleWipe(readOnly bool, w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if readOnly {
+		http.Error(w, "read-only токен: wipe запрещён", http.StatusForbidden)
 		return
 	}
 	s.mu.Lock()
@@ -318,39 +339,49 @@ func (s *Store) handleWipe(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// tenantAuth — то, во что резолвится bearer-токен: стабильная метка тенанта плюс
+// режим доступа. Read-only токен может pull'ить (видит все данные тенанта), но
+// не может push'ить изменения и не может wipe — см. handleSync/handleWipe.
+type tenantAuth struct {
+	tenant   string
+	readOnly bool
+}
+
 // requireTenant резолвит bearer-токен в тенанта и передаёт его *Store хендлеру.
 // Токен сверяется со всеми известными в constant-time и без раннего выхода, чтобы
 // не раскрывать по таймингу, какой именно токен совпал.
-func requireTenant(tokenToTenant map[string]string, m *StoreManager,
-	next func(*Store, http.ResponseWriter, *http.Request)) http.HandlerFunc {
+func requireTenant(tokenToTenant map[string]tenantAuth, m *StoreManager,
+	next func(*Store, bool, http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	type entry struct {
 		header []byte
-		tenant string
+		auth   tenantAuth
 	}
 	entries := make([]entry, 0, len(tokenToTenant))
-	for tok, tenant := range tokenToTenant {
-		entries = append(entries, entry{[]byte("Bearer " + tok), tenant})
+	for tok, auth := range tokenToTenant {
+		entries = append(entries, entry{[]byte("Bearer " + tok), auth})
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		got := []byte(r.Header.Get("Authorization"))
-		tenant := ""
+		found := false
+		var auth tenantAuth
 		for _, e := range entries {
 			if len(got) == len(e.header) && subtle.ConstantTimeCompare(got, e.header) == 1 {
-				tenant = e.tenant
+				auth = e.auth
+				found = true
 			}
 		}
-		if tenant == "" {
+		if !found {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="sklad-sync"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		store, err := m.get(tenant)
+		store, err := m.get(auth.tenant)
 		if err != nil {
-			log.Printf("не удалось открыть стор тенанта %s: %v", tenant, err)
+			log.Printf("не удалось открыть стор тенанта %s: %v", auth.tenant, err)
 			http.Error(w, "storage error", http.StatusInternalServerError)
 			return
 		}
-		next(store, w, r)
+		next(store, auth.readOnly, w, r)
 	}
 }
 
@@ -369,13 +400,15 @@ func validTenantID(s string) bool {
 }
 
 // parseTokensFile читает строки "tenantId: token" (# — комментарий, пустые строки
-// пропускаются) в карту token→tenantId. Дубли токенов и кривые метки — ошибка.
-func parseTokensFile(path string) (map[string]string, error) {
+// пропускаются) в карту token→tenantAuth. После токена можно указать модификатор
+// "ro" ("tenantId: token ro") — тогда токен даёт только чтение (pull), без
+// push/wipe. Дубли токенов и кривые метки — ошибка.
+func parseTokensFile(path string) (map[string]tenantAuth, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]string{}
+	out := map[string]tenantAuth{}
 	for i, line := range strings.Split(string(raw), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -386,17 +419,25 @@ func parseTokensFile(path string) (map[string]string, error) {
 			return nil, fmt.Errorf("tokens-файл %s: строка %d без ':'", path, i+1)
 		}
 		tenant := strings.TrimSpace(line[:idx])
-		token := strings.TrimSpace(line[idx+1:])
+		fields := strings.Fields(line[idx+1:])
 		if !validTenantID(tenant) {
 			return nil, fmt.Errorf("tokens-файл %s: недопустимый tenantId %q (нужно [a-z0-9_-], до 64)", path, tenant)
 		}
-		if token == "" {
+		if len(fields) == 0 {
 			return nil, fmt.Errorf("tokens-файл %s: пустой токен у %q", path, tenant)
+		}
+		token := fields[0]
+		readOnly := false
+		if len(fields) > 1 {
+			if len(fields) > 2 || fields[1] != "ro" {
+				return nil, fmt.Errorf("tokens-файл %s: неизвестный модификатор %q у %q (ожидался 'ro')", path, strings.Join(fields[1:], " "), tenant)
+			}
+			readOnly = true
 		}
 		if _, dup := out[token]; dup {
 			return nil, fmt.Errorf("tokens-файл %s: токен повторяется", path)
 		}
-		out[token] = tenant
+		out[token] = tenantAuth{tenant: tenant, readOnly: readOnly}
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("tokens-файл %s пуст — нет ни одного токена", path)
@@ -404,9 +445,9 @@ func parseTokensFile(path string) (map[string]string, error) {
 	return out, nil
 }
 
-// loadTokens берёт соответствия token→tenantId из -tokens-file; если файла нет,
-// откатывается на одиночный env SKLAD_SYNC_TOKEN (тенант "default").
-func loadTokens(path string) (map[string]string, error) {
+// loadTokens берёт соответствия token→tenantAuth из -tokens-file; если файла нет,
+// откатывается на одиночный env SKLAD_SYNC_TOKEN (тенант "default", read-write).
+func loadTokens(path string) (map[string]tenantAuth, error) {
 	if path != "" {
 		if _, err := os.Stat(path); err == nil {
 			return parseTokensFile(path)
@@ -415,7 +456,7 @@ func loadTokens(path string) (map[string]string, error) {
 		}
 	}
 	if tok := os.Getenv("SKLAD_SYNC_TOKEN"); tok != "" {
-		return map[string]string{tok: "default"}, nil
+		return map[string]tenantAuth{tok: {tenant: "default"}}, nil
 	}
 	return nil, fmt.Errorf("нет токенов: задай -tokens-file %q или env SKLAD_SYNC_TOKEN", path)
 }
@@ -477,7 +518,7 @@ func withCORS(allowed map[string]bool, next http.Handler) http.Handler {
 	})
 }
 
-func newMux(m *StoreManager, tokenToTenant map[string]string, staticDir string) *http.ServeMux {
+func newMux(m *StoreManager, tokenToTenant map[string]tenantAuth, staticDir string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sync", requireTenant(tokenToTenant, m, (*Store).handleSync))
 	mux.HandleFunc("/wipe", requireTenant(tokenToTenant, m, (*Store).handleWipe))

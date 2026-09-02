@@ -69,6 +69,28 @@ function toast(msg) {
   toastTimer = setTimeout(() => t.classList.remove("show"), 1800);
 }
 
+// ── Read-only токен синка ───────────────────────────────────────────────────
+// Токен может быть read-only (см. sklad-tokens.sh add-token --ro) — тогда сервер
+// принимает pull, но отклоняет push. Правки при этом блокируем и в интерфейсе:
+// не только чтобы не гонять заведомо неудачные запросы, но и чтобы не копить на
+// устройстве локальные правки, которые никогда не синхронизируются.
+
+// disabled-атрибут для кнопок/полей, которые что-то меняют — подставлять в разметку.
+function roAttr() {
+  return sync.isReadOnly() ? "disabled" : "";
+}
+
+// Проверка перед мутацией из обработчика клика (для элементов, где нативный
+// disabled не защищает — напр. кликабельный div, а не <button>). Если правка
+// запрещена — тост с объяснением и false.
+function guardWritable() {
+  if (sync.isReadOnly()) {
+    toast("Только чтение: этот токен синхронизации без прав на изменение");
+    return false;
+  }
+  return true;
+}
+
 // ── Нижний лист (формы) ───────────────────────────────────────────────────
 
 // Замыкание перерисовки текущего листа (для сворачивания списков внутри него,
@@ -166,7 +188,7 @@ function switchTab(tab) {
 }
 
 $("#header-action").addEventListener("click", () => {
-  if (currentTab === "items") sheetAddCategory();
+  if (currentTab === "items" && guardWritable()) sheetAddCategory();
 });
 
 $("#tabbar").addEventListener("click", (e) => {
@@ -176,7 +198,18 @@ $("#tabbar").addEventListener("click", (e) => {
 
 // Перерисовать текущий экран (после любой правки данных).
 function render() {
+  updateReadOnlyUI();
   RENDERERS[currentTab]();
+}
+
+// Бейдж «🔒 Только чтение» в шапке и disabled кнопки «+» там же — обновляем при
+// каждом render() и при смене статуса синка (см. sync.onStatus ниже), чтобы
+// заметить read-only сразу, даже если пользователь не на вкладке «Ещё».
+function updateReadOnlyUI() {
+  const badge = $("#ro-badge");
+  if (badge) badge.hidden = !sync.isReadOnly();
+  const headerBtn = $("#header-action");
+  if (headerBtn) headerBtn.disabled = sync.isReadOnly();
 }
 
 // Панель этажей — быстрое переключение. Показываем на экранах, привязанных к
@@ -191,7 +224,7 @@ function floorBar() {
           `<button class="floor-chip ${f.id === active ? "on" : ""}" data-floor="${f.id}">${esc(f.name)}</button>`,
       )
       .join("")}
-    <button class="floor-chip add" data-act="add-floor" title="Добавить этаж">＋</button>
+    <button class="floor-chip add" data-act="add-floor" title="Добавить этаж" ${roAttr()}>＋</button>
   </div>`;
 }
 
@@ -212,7 +245,7 @@ function renderOverview() {
       "Добавьте категории и товары, чтобы вести учёт остатков.",
       `<button class="btn block" data-act="go-items">Перейти к товарам</button>
        <div class="spacer"></div>
-       <button class="btn secondary block" data-act="seed">Загрузить демо-данные</button>`,
+       <button class="btn secondary block" data-act="seed" ${roAttr()}>Загрузить демо-данные</button>`,
     );
     return;
   }
@@ -397,7 +430,7 @@ function renderItems() {
         placeholder="Поиск товара или категории" value="${esc(itemSearch)}" />
       <button class="icon-btn search-clear" id="search-clear" ${itemSearch ? "" : "hidden"} title="Очистить">✕</button>
     </div>
-    <button class="btn block" data-act="add-item-global">＋ Товар</button>
+    <button class="btn block" data-act="add-item-global" ${roAttr()}>＋ Товар</button>
     ${itemSearch.trim() ? "" : collapseAllRow(store.categoriesForFloor().map((c) => "items:" + c.id))}
     <div id="items-list"></div>`;
 
@@ -478,8 +511,8 @@ function renderItemsList() {
           ${caret}<span class="truncate">${esc(c.name)}</span>
         </span>
         <span class="cat-stock nowrap">${rightTxt}</span>
-        <button class="icon-btn cat-edit" data-add-item="${c.id}" title="Добавить товар">＋</button>
-        <button class="icon-btn cat-del" data-del-cat="${c.id}" title="Убрать категорию с этажа">🗑️</button>
+        <button class="icon-btn cat-edit" data-add-item="${c.id}" title="Добавить товар" ${roAttr()}>＋</button>
+        <button class="icon-btn cat-del" data-del-cat="${c.id}" title="Убрать категорию с этажа" ${roAttr()}>🗑️</button>
       </div>`;
 
       if (!collapsed) {
@@ -529,7 +562,7 @@ function hiddenCatsSection(cats) {
       (c) => `<div class="list-item">
         <div class="grow"><div class="name">${esc(c.name)}</div>
           <div class="sub">${store.itemsOf(c.id).length} поз. · скрыта на этом этаже</div></div>
-        <button class="btn secondary small" data-restore-cat="${c.id}">Вернуть</button>
+        <button class="btn secondary small" data-restore-cat="${c.id}" ${roAttr()}>Вернуть</button>
       </div>`,
     )
     .join("");
@@ -645,8 +678,8 @@ function renderEntryList() {
                 <div class="muted nowrap">${fmt(stock)} ${esc(un(it.unit))}</div>
               </div>
               <div class="stepper">
-                <button class="step-btn out" data-mv="out" data-item="${it.id}">Расход<small>списать со склада</small></button>
-                <button class="step-btn in" data-mv="in" data-item="${it.id}">Приход<small>добавить на склад</small></button>
+                <button class="step-btn out" data-mv="out" data-item="${it.id}" ${roAttr()}>Расход<small>списать со склада</small></button>
+                <button class="step-btn in" data-mv="in" data-item="${it.id}" ${roAttr()}>Приход<small>добавить на склад</small></button>
               </div>
             </div>`;
           })
@@ -920,12 +953,12 @@ function renderSettings() {
         .map(
           (f) => `<div class="list-item">
         <div class="grow"><div class="name">${esc(f.name)}</div></div>
-        <button class="icon-btn" data-floor-edit="${f.id}" title="Переименовать" style="width:40px;height:40px;font-size:16px">✎</button>
-        ${fl.length > 1 ? `<button class="icon-btn" data-floor-del="${f.id}" title="Удалить" style="width:40px;height:40px;font-size:16px">🗑️</button>` : ""}
+        <button class="icon-btn" data-floor-edit="${f.id}" title="Переименовать" style="width:40px;height:40px;font-size:16px" ${roAttr()}>✎</button>
+        ${fl.length > 1 ? `<button class="icon-btn" data-floor-del="${f.id}" title="Удалить" style="width:40px;height:40px;font-size:16px" ${roAttr()}>🗑️</button>` : ""}
       </div>`,
         )
         .join("")}
-      <div class="card-pad"><button class="btn secondary small" data-act="add-floor">＋ Этаж</button></div>
+      <div class="card-pad"><button class="btn secondary small" data-act="add-floor" ${roAttr()}>＋ Этаж</button></div>
     </div>
     <p class="hint">У каждого этажа свой остаток; категории и товары общие. Переключение — на экранах «Обзор», «Ввод», «Товары», «Аналитика».</p>`
     }
@@ -941,13 +974,13 @@ function renderSettings() {
               .map(
                 (c) => `<div class="list-item">
         <div class="grow"><div class="name">${esc(c.name)}</div></div>
-        <button class="icon-btn" data-edit-cat="${c.id}" title="Переименовать или удалить" style="width:40px;height:40px;font-size:16px">✎</button>
+        <button class="icon-btn" data-edit-cat="${c.id}" title="Переименовать или удалить" style="width:40px;height:40px;font-size:16px" ${roAttr()}>✎</button>
       </div>`,
               )
               .join("")
           : `<div class="list-item muted">Пока нет категорий</div>`
       }
-      <div class="card-pad"><button class="btn secondary small" data-act="add-cat">＋ Категория</button></div>
+      <div class="card-pad"><button class="btn secondary small" data-act="add-cat" ${roAttr()}>＋ Категория</button></div>
     </div>
     <p class="hint">Категории общие для всех этажей. Товары добавляются на экране «Товары».</p>`
     }
@@ -964,17 +997,17 @@ function renderSettings() {
         ${order
           .map(
             (d) =>
-              `<button class="wd ${st.workingDays.includes(d) ? "on" : ""}" data-wd="${d}">${WD_SHORT[d]}</button>`,
+              `<button class="wd ${st.workingDays.includes(d) ? "on" : ""}" data-wd="${d}" ${roAttr()}>${WD_SHORT[d]}</button>`,
           )
           .join("")}
       </div>
       <div class="switch-row">
         <span>Считать только по рабочим дням</span>
-        <input type="checkbox" id="wd-only" ${st.workingDaysOnly ? "checked" : ""} style="width:auto;min-height:auto" />
+        <input type="checkbox" id="wd-only" ${st.workingDaysOnly ? "checked" : ""} ${roAttr()} style="width:auto;min-height:auto" />
       </div>
       <label class="field" style="margin-bottom:0">
         <span class="lbl">Окно усреднения расхода</span>
-        <select id="window-days">
+        <select id="window-days" ${roAttr()}>
           ${[7, 14, 30, 60, 90]
             .map(
               (n) =>
@@ -1005,6 +1038,17 @@ function renderSettings() {
       <button class="btn secondary block" data-act="sync-now">🔄 Синхронизировать сейчас</button>
       <div id="sync-status" style="margin-top:10px">${syncStatusHtml()}</div>
       <div class="divider"></div>
+      <div class="switch-row">
+        <span>Режим «только чтение» на этом устройстве${sync.isServerReadOnly() ? " · задан токеном" : ""}</span>
+        <input type="checkbox" id="force-readonly"
+          ${sync.isServerReadOnly() ? "checked disabled" : sync.isForcedReadOnly() ? "checked" : ""} />
+      </div>
+      <p class="hint" style="margin-top:0">${
+        sync.isServerReadOnly()
+          ? "Сам токен синхронизации — только для чтения, переключатель тут ничего не меняет."
+          : "Включите, чтобы проверить интерфейс так, как его видит пользователь с read-only токеном — блокирует правки только на этом устройстве, сервера не касается."
+      }</p>
+      <div class="divider"></div>
       <p class="hint" style="margin-top:0">Второе устройство (чтобы забрать данные с сервера, стерев локальные):</p>
       <button class="btn secondary block" data-act="sync-pull">⬇️ Заменить локальные данными с сервера</button>
     </div>`
@@ -1018,14 +1062,14 @@ function renderSettings() {
       <p class="hint" style="margin-top:0">Данные хранятся в этом браузере на устройстве. Делайте резервную копию и переносите на другой телефон через файл.</p>
       <button class="btn block" data-act="export">⬇️ Сохранить копию (файл)</button>
       <div class="spacer"></div>
-      <button class="btn secondary block" data-act="import">⬆️ Загрузить из файла</button>
+      <button class="btn secondary block" data-act="import" ${roAttr()}>⬆️ Загрузить из файла</button>
       <div class="divider"></div>
-      <button class="btn secondary block" data-act="import-xlsx">📊 Импорт из Excel (.xlsx)</button>
+      <button class="btn secondary block" data-act="import-xlsx" ${roAttr()}>📊 Импорт из Excel (.xlsx)</button>
       <p class="hint" style="margin-bottom:0">Загрузите вашу Excel-таблицу — приложение само разберёт категории, товары, остатки и расход. Текущие данные будут заменены.</p>
       <div class="divider"></div>
-      <button class="btn secondary block" data-act="seed">Загрузить демо-данные</button>
+      <button class="btn secondary block" data-act="seed" ${roAttr()}>Загрузить демо-данные</button>
       <div class="spacer"></div>
-      <button class="btn danger block" data-act="wipe">Удалить все данные</button>
+      <button class="btn danger block" data-act="wipe" ${roAttr()}>Удалить все данные</button>
     </div>`
     }
     </div>
@@ -1044,10 +1088,11 @@ function sheetAddCategory() {
       <span class="lbl">Название</span>
       <input id="f-name" placeholder="Напр. Молочные продукты" autofocus />
     </label>
-    <button class="btn block" data-save="cat">Добавить</button>
+    <button class="btn block" data-save="cat" ${roAttr()}>Добавить</button>
   `);
   focusFirst();
   $('[data-save="cat"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const name = $("#f-name").value.trim();
     if (!name) return toast("Введите название");
     store.addCategory(name);
@@ -1066,12 +1111,13 @@ function sheetEditCategory(id) {
       <span class="lbl">Название</span>
       <input id="f-name" value="${esc(c.name)}" />
     </label>
-    <button class="btn block" data-save="rename">Сохранить</button>
+    <button class="btn block" data-save="rename" ${roAttr()}>Сохранить</button>
     <div class="spacer"></div>
-    <button class="btn danger block" data-del="cat">Удалить категорию и её товары</button>
+    <button class="btn danger block" data-del="cat" ${roAttr()}>Удалить категорию и её товары</button>
   `);
   focusFirst();
   $('[data-save="rename"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const name = $("#f-name").value.trim();
     if (!name) return toast("Введите название");
     store.renameCategory(id, name);
@@ -1079,6 +1125,7 @@ function sheetEditCategory(id) {
     render();
   });
   $('[data-del="cat"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     if (!confirm(`Удалить «${c.name}» со всеми товарами и историей?`)) return;
     store.deleteCategory(id);
     closeSheet();
@@ -1126,10 +1173,11 @@ function sheetCreateItem({ name = "", categoryId = null } = {}) {
       </label>
     </div>
     <p class="hint">Мин. остаток — порог, ниже которого товар нужно заказывать.</p>
-    <button class="btn block" data-save="item">Добавить</button>
+    <button class="btn block" data-save="item" ${roAttr()}>Добавить</button>
   `);
   focusFirst();
   $('[data-save="item"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const nm = $("#f-name").value.trim();
     if (!nm) return toast("Введите название");
     const cid = fixed ? categoryId : $("#f-cat").value;
@@ -1220,8 +1268,8 @@ function mvRow2(m) {
     <span class="mv-col-num mv-qty in">${m.type === "in" ? "＋" + fmt(m.qty) : ""}</span>
     <span class="mv-col-num mv-qty out">${m.type === "out" ? "−" + fmt(m.qty) : ""}</span>
     <span class="mv-col-act">
-      ${m.transfer ? "" : `<button class="icon-btn" data-edit-mv="${m.id}" title="Изменить">✎</button>`}
-      <button class="icon-btn" data-del-mv="${m.id}" title="Удалить">🗑️</button>
+      ${m.transfer ? "" : `<button class="icon-btn" data-edit-mv="${m.id}" title="Изменить" ${roAttr()}>✎</button>`}
+      <button class="icon-btn" data-del-mv="${m.id}" title="Удалить" ${roAttr()}>🗑️</button>
     </span>
   </div>`;
 }
@@ -1324,24 +1372,25 @@ function sheetItemDetail(id, { scope } = {}) {
     </div>
 
     <div class="stepper" style="margin-bottom:12px">
-      <button class="step-btn out" data-mv="out" data-item="${id}" data-act-floor="${actionFloorId}">Расход</button>
-      <button class="step-btn in" data-mv="in" data-item="${id}" data-act-floor="${actionFloorId}">Приход</button>
+      <button class="step-btn out" data-mv="out" data-item="${id}" data-act-floor="${actionFloorId}" ${roAttr()}>Расход</button>
+      <button class="step-btn in" data-mv="in" data-item="${id}" data-act-floor="${actionFloorId}" ${roAttr()}>Приход</button>
     </div>
-    <button class="btn secondary block" data-act="inventory" data-item="${id}" data-act-floor="${actionFloorId}">📋 Инвентаризация (задать остаток)</button>
+    <button class="btn secondary block" data-act="inventory" data-item="${id}" data-act-floor="${actionFloorId}" ${roAttr()}>📋 Инвентаризация (задать остаток)</button>
     <div class="spacer"></div>
-    <button class="btn secondary block" data-act="transfer" data-item="${id}" data-act-floor="${actionFloorId}">🔀 Перенести на другой этаж</button>
+    <button class="btn secondary block" data-act="transfer" data-item="${id}" data-act-floor="${actionFloorId}" ${roAttr()}>🔀 Перенести на другой этаж</button>
 
     <h2 class="section-title">Движения по этажам</h2>
     ${collapseAllRow(floorsWithMv.map(({ f }) => "mv:" + f.id))}
     ${historyHtml}
 
     <div class="divider"></div>
-    <button class="btn secondary block" data-act="edit-item" data-item="${id}">Изменить товар</button>
+    <button class="btn secondary block" data-act="edit-item" data-item="${id}" ${roAttr()}>Изменить товар</button>
     <div class="spacer"></div>
-    <button class="btn danger block" data-del-item="${id}">Удалить товар</button>
+    <button class="btn danger block" data-del-item="${id}" ${roAttr()}>Удалить товар</button>
   `);
 
   $('[data-del-item]')?.addEventListener("click", () => {
+    if (!guardWritable()) return;
     if (!confirm(`Удалить «${it.name}» и всю его историю?`)) return;
     store.deleteItem(id);
     closeSheet();
@@ -1350,13 +1399,17 @@ function sheetItemDetail(id, { scope } = {}) {
   });
   $$('[data-del-mv]').forEach((b) =>
     b.addEventListener("click", () => {
+      if (!guardWritable()) return;
       store.deleteMovement(b.dataset.delMv);
       sheetItemDetail(id); // перерисовать лист
       render();
     }),
   );
   $$('[data-edit-mv]').forEach((b) =>
-    b.addEventListener("click", () => sheetEditMovement(b.dataset.editMv, id)),
+    b.addEventListener("click", () => {
+      if (!guardWritable()) return;
+      sheetEditMovement(b.dataset.editMv, id);
+    }),
   );
 }
 
@@ -1381,7 +1434,7 @@ function sheetMovement(itemId, type, floorId) {
       <span class="lbl">Дата</span>
       <input id="f-date" type="date" value="${entryDate}" max="${todayISO()}" />
     </label>
-    <button class="btn block" data-save="mv" style="background:${isIn ? "var(--ok)" : "var(--crit)"}">
+    <button class="btn block" data-save="mv" style="background:${isIn ? "var(--ok)" : "var(--crit)"}" ${roAttr()}>
       ${isIn ? "＋ Добавить приход" : "− Списать расход"}
     </button>
   `);
@@ -1394,6 +1447,7 @@ function sheetMovement(itemId, type, floorId) {
     }),
   );
   $('[data-save="mv"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const qty = parseNum(qtyEl.value);
     if (qty <= 0) return toast("Введите количество");
     // Нельзя списать больше, чем есть — остаток не должен уходить в минус.
@@ -1433,10 +1487,11 @@ function sheetEditMovement(movementId, itemId) {
       <span class="lbl">Дата</span>
       <input id="f-date" type="date" value="${m.date}" max="${todayISO()}" />
     </label>
-    <button class="btn block" data-save="edit-mv" style="background:${isIn ? "var(--ok)" : "var(--crit)"}">Сохранить</button>
+    <button class="btn block" data-save="edit-mv" style="background:${isIn ? "var(--ok)" : "var(--crit)"}" ${roAttr()}>Сохранить</button>
   `);
   focusFirst();
   $('[data-save="edit-mv"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const qty = parseNum($("#f-qty").value);
     if (qty <= 0) return toast("Введите количество");
     // Для расхода/инвентаризации-в-минус: не дать остатку уйти в минус.
@@ -1471,10 +1526,11 @@ function sheetInventory(itemId, floorId) {
       <span class="lbl">Дата</span>
       <input id="f-date" type="date" value="${todayISO()}" max="${todayISO()}" />
     </label>
-    <button class="btn block" data-save="inv">Сохранить остаток</button>
+    <button class="btn block" data-save="inv" ${roAttr()}>Сохранить остаток</button>
   `);
   focusFirst();
   $('[data-save="inv"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const val = parseNum($("#f-qty").value);
     if (val < 0) return toast("Остаток не может быть отрицательным");
     store.setStock(itemId, val, $("#f-date").value || todayISO(), "Инвентаризация", fid);
@@ -1496,7 +1552,7 @@ function sheetTransfer(itemId, fromFloorId) {
         <div style="font-weight:700;color:var(--text)">Пока только один этаж</div>
         <div style="margin-top:6px">Чтобы переносить товары между этажами, сначала добавьте второй этаж.</div>
       </div>
-      <button class="btn block" data-act="add-floor">＋ Добавить этаж</button>
+      <button class="btn block" data-act="add-floor" ${roAttr()}>＋ Добавить этаж</button>
     `);
     return;
   }
@@ -1521,7 +1577,7 @@ function sheetTransfer(itemId, fromFloorId) {
       <input id="f-qty" type="number" inputmode="decimal" step="any" min="0" placeholder="0" />
     </label>
     <div class="row" style="gap:8px;margin-bottom:14px" id="preset-row"></div>
-    <button class="btn block" data-save="transfer">🔀 Перенести</button>
+    <button class="btn block" data-save="transfer" ${roAttr()}>🔀 Перенести</button>
   `);
   focusFirst();
   const fromEl = $("#f-from");
@@ -1562,6 +1618,7 @@ function sheetTransfer(itemId, fromFloorId) {
     }
   });
   $('[data-save="transfer"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const qty = parseNum(qtyEl.value);
     if (qty <= 0) return toast("Введите количество");
     const fromId = fromEl.value;
@@ -1587,10 +1644,11 @@ function sheetAddFloor() {
       <span class="lbl">Название</span>
       <input id="f-name" placeholder="Напр. Этаж 3" />
     </label>
-    <button class="btn block" data-save="floor">Добавить</button>
+    <button class="btn block" data-save="floor" ${roAttr()}>Добавить</button>
   `);
   focusFirst();
   $('[data-save="floor"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const name = $("#f-name").value.trim();
     if (!name) return toast("Введите название");
     store.addFloor(name); // активный этаж не меняем — переключиться можно чипом
@@ -1609,10 +1667,11 @@ function sheetRenameFloor(id) {
       <span class="lbl">Название</span>
       <input id="f-name" value="${esc(f.name)}" />
     </label>
-    <button class="btn block" data-save="floor-rename">Сохранить</button>
+    <button class="btn block" data-save="floor-rename" ${roAttr()}>Сохранить</button>
   `);
   focusFirst();
   $('[data-save="floor-rename"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const name = $("#f-name").value.trim();
     if (!name) return toast("Введите название");
     store.renameFloor(id, name);
@@ -1632,10 +1691,11 @@ function sheetEditMin(id) {
       <span class="lbl">Минимальный остаток (${esc(un(it.unit))})</span>
       <input id="f-min" type="number" inputmode="decimal" step="any" min="0" value="${it.minStock}" />
     </label>
-    <button class="btn block" data-save="min">Сохранить</button>
+    <button class="btn block" data-save="min" ${roAttr()}>Сохранить</button>
   `);
   focusFirst();
   $('[data-save="min"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const v = parseNum($("#f-min").value);
     if (v < 0) return toast("Не может быть отрицательным");
     store.updateItem(id, { minStock: v });
@@ -1672,10 +1732,11 @@ function sheetEditItem(id) {
         <input id="f-min" type="number" inputmode="decimal" value="${it.minStock}" />
       </label>
     </div>
-    <button class="btn block" data-save="edit">Сохранить</button>
+    <button class="btn block" data-save="edit" ${roAttr()}>Сохранить</button>
   `);
   focusFirst();
   $('[data-save="edit"]').addEventListener("click", () => {
+    if (!guardWritable()) return;
     const name = $("#f-name").value.trim();
     if (!name) return toast("Введите название");
     store.updateItem(id, {
@@ -1742,11 +1803,10 @@ async function saveSyncConfig() {
   sync.setConfig({ url, token });
   toast("Проверяю подключение…");
   const r = await sync.testConnection(url, token);
-  updateSyncStatus();
+  render(); // сразу отразить узнанный readOnly — блокирует контролы на этом экране
   if (!r.ok) return alert("Не удалось подключиться: " + r.error);
   const res = await sync.syncNow();
-  updateSyncStatus();
-  if (res.changed) render();
+  render();
   toast(res.ok ? "Подключено и синхронизировано" : "Ошибка синхронизации");
 }
 
@@ -1754,8 +1814,7 @@ async function runSyncNow() {
   if (!sync.isConfigured()) return toast("Сначала задайте адрес и токен");
   toast("Синхронизирую…");
   const r = await sync.syncNow();
-  updateSyncStatus();
-  if (r.changed) render();
+  render();
   toast(r.ok ? "Синхронизировано" : "Ошибка: " + (r.error || ""));
 }
 
@@ -1796,7 +1855,7 @@ document.addEventListener("click", (e) => {
   const itemRow = t.closest("[data-item]");
   const mvBtn = t.closest("[data-mv]");
   if (mvBtn) {
-    sheetMovement(mvBtn.dataset.item, mvBtn.dataset.mv, mvBtn.dataset.actFloor);
+    if (guardWritable()) sheetMovement(mvBtn.dataset.item, mvBtn.dataset.mv, mvBtn.dataset.actFloor);
     return;
   }
 
@@ -1817,9 +1876,10 @@ document.addEventListener("click", (e) => {
   }
 
   const act = t.closest("[data-act]")?.dataset.act;
-  if (act === "add-cat") return sheetAddCategory();
-  if (act === "add-item-global") return sheetAddItemGlobal();
+  if (act === "add-cat") return guardWritable() && sheetAddCategory();
+  if (act === "add-item-global") return guardWritable() && sheetAddItemGlobal();
   if (act === "seed") {
+    if (!guardWritable()) return;
     if (store.allItems().length && !confirm("Заменить текущие данные демо-набором?")) return;
     store.seedDemo();
     render();
@@ -1842,9 +1902,10 @@ document.addEventListener("click", (e) => {
   if (act === "sync-now") return runSyncNow();
   if (act === "sync-pull") return runPullReplace();
   if (act === "export") return exportData();
-  if (act === "import") return $("#import-file").click();
-  if (act === "import-xlsx") return $("#xlsx-file").click();
+  if (act === "import") return guardWritable() && $("#import-file").click();
+  if (act === "import-xlsx") return guardWritable() && $("#xlsx-file").click();
   if (act === "wipe") {
+    if (!guardWritable()) return;
     if (!confirm("Удалить все данные без возможности восстановления?")) return;
     store.replaceState({});
     render();
@@ -1852,22 +1913,24 @@ document.addEventListener("click", (e) => {
     return;
   }
   if (act === "inventory") {
+    if (!guardWritable()) return;
     const el = t.closest("[data-item]");
     return sheetInventory(el.dataset.item, el.dataset.actFloor);
   }
-  if (act === "edit-item") return sheetEditItem(t.closest("[data-item]").dataset.item);
-  if (act === "edit-min") return sheetEditMin(t.closest("[data-item]").dataset.item);
+  if (act === "edit-item") return guardWritable() && sheetEditItem(t.closest("[data-item]").dataset.item);
+  if (act === "edit-min") return guardWritable() && sheetEditMin(t.closest("[data-item]").dataset.item);
   if (act === "transfer") {
+    if (!guardWritable()) return;
     const el = t.closest("[data-item]");
     return sheetTransfer(el.dataset.item, el.dataset.actFloor);
   }
-  if (act === "add-floor") return sheetAddFloor();
+  if (act === "add-floor") return guardWritable() && sheetAddFloor();
 
   const addItemCat = t.closest("[data-add-item]")?.dataset.addItem;
-  if (addItemCat) return sheetCreateItem({ categoryId: addItemCat });
+  if (addItemCat) return guardWritable() && sheetCreateItem({ categoryId: addItemCat });
 
   const editCat = t.closest("[data-edit-cat]")?.dataset.editCat;
-  if (editCat) return sheetEditCategory(editCat);
+  if (editCat) return guardWritable() && sheetEditCategory(editCat);
 
   // Убрать категорию с текущего этажа: скрыть её из отображения этого этажа.
   // Движения не трогаем — на других этажах и в глобальном списке категория
@@ -1875,6 +1938,7 @@ document.addEventListener("click", (e) => {
   // этажей — в «Ещё → Категории».
   const delCat = t.closest("[data-del-cat]")?.dataset.delCat;
   if (delCat) {
+    if (!guardWritable()) return;
     const c = store.getCategory(delCat);
     const fname = store.getActiveFloor()?.name || "";
     if (
@@ -1892,6 +1956,7 @@ document.addEventListener("click", (e) => {
 
   const restoreCat = t.closest("[data-restore-cat]")?.dataset.restoreCat;
   if (restoreCat) {
+    if (!guardWritable()) return;
     store.unhideCategoryOnFloor(restoreCat);
     render();
     toast("Категория возвращена на этаж");
@@ -1914,19 +1979,29 @@ document.addEventListener("click", (e) => {
 
 $("#view-settings").addEventListener("change", (e) => {
   if (e.target.id === "wd-only") {
+    if (!guardWritable()) return;
     store.updateSettings({ workingDaysOnly: e.target.checked });
     render();
   }
   if (e.target.id === "window-days") {
+    if (!guardWritable()) return;
     store.updateSettings({ windowDays: Number(e.target.value) });
     render();
+  }
+  // Локальный тумблер проверки read-only — сам по себе не мутирует данные,
+  // guardWritable() тут не нужен (это ровно то, что он позволяет переключать).
+  if (e.target.id === "force-readonly") {
+    sync.setForceReadOnly(e.target.checked);
+    render();
+    toast(e.target.checked ? "Режим «только чтение» включён на этом устройстве" : "Режим «только чтение» выключен");
   }
 });
 $("#view-settings").addEventListener("click", (e) => {
   const fe = e.target.closest("[data-floor-edit]");
-  if (fe) return sheetRenameFloor(fe.dataset.floorEdit);
+  if (fe) return guardWritable() && sheetRenameFloor(fe.dataset.floorEdit);
   const fd = e.target.closest("[data-floor-del]");
   if (fd) {
+    if (!guardWritable()) return;
     const f = store.getFloor(fd.dataset.floorDel);
     if (f && confirm(`Удалить этаж «${f.name}» со всеми его остатками и движениями?`)) {
       store.deleteFloor(fd.dataset.floorDel);
@@ -1937,6 +2012,7 @@ $("#view-settings").addEventListener("click", (e) => {
   }
   const wd = e.target.closest("[data-wd]");
   if (wd) {
+    if (!guardWritable()) return;
     const st = store.getSettings();
     const d = Number(wd.dataset.wd);
     let days = st.workingDays.includes(d)
@@ -1971,13 +2047,13 @@ $("#view-analytics").addEventListener("click", (e) => {
 });
 
 $("#import-file").addEventListener("change", (e) => {
-  if (e.target.files[0]) importData(e.target.files[0]);
+  if (e.target.files[0] && guardWritable()) importData(e.target.files[0]);
   e.target.value = "";
 });
 $("#xlsx-file").addEventListener("change", async (e) => {
   const file = e.target.files[0];
   e.target.value = "";
-  if (!file) return;
+  if (!file || !guardWritable()) return;
   toast("Читаю файл…");
   try {
     const buf = await file.arrayBuffer();
@@ -2025,8 +2101,10 @@ function scheduleAutoSync() {
 }
 store.onChange(scheduleAutoSync);
 
-// Обновляем строку статуса синка, если открыт экран настроек.
+// Обновляем строку статуса синка, если открыт экран настроек, и бейдж
+// «только чтение» в шапке — независимо от текущей вкладки.
 sync.onStatus(() => {
+  updateReadOnlyUI();
   if (currentTab === "settings") updateSyncStatus();
 });
 
@@ -2041,8 +2119,19 @@ function syncStatusHtml() {
     return `<span class="muted">Синк выключен — задайте адрес и токен.</span>`;
   }
   const s = sync.getStatus();
-  const pending = sync.pendingCount();
   const when = s.lastSyncAt ? new Date(s.lastSyncAt).toLocaleTimeString("ru-RU") : "—";
+  // Read-only (серверный токен или локальный тумблер-проверка): не отправленные
+  // правки никогда не уедут на сервер, поэтому не показываем «не отправлено: N»
+  // (звучит как «уедёт позже») и не пугаем ожидаемым отказом push как «Ошибкой».
+  if (s.readOnly) {
+    return `<span class="muted">Последний синк: ${when}</span>
+      <div class="badge ro-badge" style="margin-top:6px">🔒 Токен только для чтения — правки в приложении не сохранятся на сервере</div>`;
+  }
+  if (s.forceReadOnly) {
+    return `<span class="muted">Последний синк: ${when}</span>
+      <div class="badge ro-badge" style="margin-top:6px">🔒 Локальная проверка read-only включена — правки на этом устройстве заблокированы</div>`;
+  }
+  const pending = sync.pendingCount();
   let line = s.syncing
     ? `<span class="muted">Синхронизирую…</span>`
     : `<span class="muted">Последний синк: ${when} · не отправлено: ${pending}</span>`;

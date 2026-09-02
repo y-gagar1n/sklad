@@ -50,6 +50,10 @@ function serverFor(token) {
   return tenants.get(token);
 }
 
+// Токены, помеченные read-only (зеркалит "tenantId: token ro" в tokens-файле
+// бэкенда): pull работает, push — 403, как в backend/main.go.
+const roTokens = new Set();
+
 // server — модель тенанта токена "t" (его ставит fresh()); на неё смотрят тесты.
 let server = serverFor("t");
 
@@ -67,12 +71,24 @@ globalThis.fetch = async (url, opts = {}) => {
   if (url.endsWith("/sync") || url.endsWith("/wipe")) {
     const token = bearer(opts);
     if (!token) return { ok: false, status: 401, json: async () => ({}) };
-    const srv = serverFor(token);
+    const isRO = roTokens.has(token);
     const body = JSON.parse(opts.body || "{}");
+    const hasIncoming = Object.keys(body).some(
+      (k) => k !== "since" && Array.isArray(body[k]) && body[k].length,
+    );
+    if (isRO && (url.endsWith("/wipe") || hasIncoming)) {
+      return {
+        ok: false,
+        status: 403,
+        text: async () => "read-only токен: запись запрещена",
+        json: async () => ({}),
+      };
+    }
+    const srv = serverFor(token);
     let since = body.since || 0;
     if (since > srv.seq) since = 0;
     for (const n of srv.names) srv.apply(n, body[n]);
-    const out = { seq: srv.seq };
+    const out = { seq: srv.seq, readOnly: isRO };
     for (const n of srv.names) out[n] = srv.changedSince(n, since);
     return { ok: true, status: 200, json: async () => out };
   }
@@ -85,6 +101,7 @@ const sync = await import("../assets/sync.js");
 function fresh() {
   mem.clear();
   tenants.clear();
+  roTokens.clear();
   server = serverFor("t"); // тенант токена "t" — с ним работает клиент по умолчанию
   store.replaceState({});
   sync.resetSyncState();
@@ -254,7 +271,115 @@ test("pullReplace: второе устройство становится зер
   assert.equal(store.categories().length, 1);
 });
 
-// ── Многотенантность ──────────────────────────────────────────────────────
+// ── Read-only токены ───────────────────────────────────────────────────────
+
+// testConnection шлёт {since:0} без коллекций — чистый pull, без push. Это путь
+// реального UI (saveSyncConfig зовёт testConnection сразу после setConfig), так
+// read-only узнаётся ДО того, как syncNow попробует запушить дефолтные локальные
+// записи (этаж/настройки, которые есть у любого свежего устройства) и получит 403.
+test("read-only токен: testConnection узнаёт readOnly чистым pull'ом, без 403", async () => {
+  fresh();
+  roTokens.add("ro-t");
+  sync.setConfig({ url: "https://x.example", token: "ro-t" });
+  assert.equal(sync.isReadOnly(), false); // до первого сетевого ответа — режим ещё не известен
+
+  const r = await sync.testConnection("https://x.example", "ro-t");
+  assert.equal(r.ok, true);
+  assert.equal(r.readOnly, true);
+  assert.equal(sync.isReadOnly(), true);
+  // Закэшировано в конфиге — переживает перезагрузку страницы.
+  assert.equal(JSON.parse(localStorage.getItem("sklad-sync-config")).readOnly, true);
+});
+
+test("read-only токен: известный readOnly — syncNow не пушит, правка остаётся в очереди", async () => {
+  fresh();
+  roTokens.add("ro-t2");
+  sync.setConfig({ url: "https://x.example", token: "ro-t2" });
+  await sync.testConnection("https://x.example", "ro-t2");
+  assert.equal(sync.isReadOnly(), true);
+
+  store.addCategory("Тайком добавлено");
+  assert.ok(sync.pendingCount() > 0);
+
+  // syncNow больше не пытается пушить, раз readOnly уже известен (иначе сервер
+  // 403-т ВЕСЬ запрос и мы бы теряли pull-часть вместе с push) — чистый pull
+  // проходит успешно, а неотправленная правка остаётся «в очереди», а не
+  // тихо помечается синхронизированной.
+  const r = await sync.syncNow();
+  assert.equal(r.ok, true);
+  assert.equal(r.pushed, false);
+  assert.ok(sync.pendingCount() > 0);
+});
+
+test("read-only токен: 403 на неожиданном push (readOnly ещё не был известен) не топит pull навсегда", async () => {
+  fresh();
+  roTokens.add("ro-t4");
+  sync.setConfig({ url: "https://x.example", token: "ro-t4" });
+  // Сервер уже что-то знает про этот тенант (другое устройство запушило).
+  server = serverFor("ro-t4");
+  server.apply("categories", [{ id: "srv1", updatedAt: 1, deleted: false, data: { name: "С сервера", order: 0 } }]);
+
+  // Без предварительного testConnection syncNow ещё не знает readOnly и пушит
+  // локальные дефолты — сервер 403-т весь запрос, pull теряется вместе с push.
+  const r1 = await sync.syncNow();
+  assert.equal(r1.ok, false);
+  assert.equal(sync.isReadOnly(), true); // хотя бы режим узнали из самого 403
+
+  // Но следующий syncNow уже знает readOnly, push не шлёт — и данные с сервера доезжают.
+  const r2 = await sync.syncNow();
+  assert.equal(r2.ok, true);
+  assert.ok(store.getCategory("srv1"));
+});
+
+test("смена токена сбрасывает закэшированный readOnly до следующего /sync", async () => {
+  fresh();
+  roTokens.add("ro-t3");
+  sync.setConfig({ url: "https://x.example", token: "ro-t3" });
+  await sync.syncNow();
+  assert.equal(sync.isReadOnly(), true);
+
+  sync.setConfig({ url: "https://x.example", token: "t" }); // обычный read-write токен
+  assert.equal(sync.isReadOnly(), false);
+});
+
+// ── Локальный тумблер forceReadOnly ─────────────────────────────────────────
+
+test("forceReadOnly: включает isReadOnly() у обычного токена, не мешает pull, блокирует push", async () => {
+  fresh(); // токен "t" — обычный read-write
+  assert.equal(sync.isReadOnly(), false);
+  assert.equal(sync.isServerReadOnly(), false);
+
+  sync.setForceReadOnly(true);
+  assert.equal(sync.isReadOnly(), true);
+  assert.equal(sync.isServerReadOnly(), false); // источник — локальный тумблер, не токен
+  assert.equal(sync.isForcedReadOnly(), true);
+
+  // Другое устройство добавило категорию на сервере — pull всё равно проходит.
+  server.apply("categories", [{ id: "remote1", updatedAt: Date.now(), deleted: false, data: { name: "Чай", order: 0 } }]);
+  const r1 = await sync.syncNow();
+  assert.equal(r1.ok, true);
+  assert.equal(r1.pushed, false);
+  assert.ok(store.getCategory("remote1"));
+
+  // Локальная правка не пушится и остаётся в очереди — как у настоящего read-only.
+  store.addCategory("Локально при проверке");
+  assert.ok(sync.pendingCount() > 0);
+  const r2 = await sync.syncNow();
+  assert.equal(r2.ok, true);
+  assert.equal(r2.pushed, false);
+  assert.ok(sync.pendingCount() > 0);
+
+  sync.setForceReadOnly(false);
+  assert.equal(sync.isReadOnly(), false);
+});
+
+test("forceReadOnly переживает смену токена (это настройка устройства, а не токена)", async () => {
+  fresh();
+  sync.setForceReadOnly(true);
+  sync.setConfig({ url: "https://x.example", token: "t" });
+  assert.equal(sync.isForcedReadOnly(), true);
+  assert.equal(sync.isReadOnly(), true);
+});
 
 test("сервер изолирует данные по токену; без токена — 401", async () => {
   fresh();

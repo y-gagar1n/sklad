@@ -35,7 +35,7 @@ func newTestStore(t *testing.T) *Store {
 // существующие тесты, инспектирующие s.state, продолжают работать.
 func muxFor(s *Store, token string) *http.ServeMux {
 	m := &StoreManager{stores: map[string]*Store{"default": s}}
-	return newMux(m, map[string]string{token: "default"}, "")
+	return newMux(m, map[string]tenantAuth{token: {tenant: "default"}}, "")
 }
 
 func newTestManager(t *testing.T) *StoreManager {
@@ -405,7 +405,7 @@ func TestConcurrentSync(t *testing.T) {
 // Токен A не видит данные токена B, и wipe одного тенанта не трогает другого.
 func TestTenantIsolation(t *testing.T) {
 	m := newTestManager(t)
-	h := newMux(m, map[string]string{"ta": "anya", "tb": "bob"}, "")
+	h := newMux(m, map[string]tenantAuth{"ta": {tenant: "anya"}, "tb": {tenant: "bob"}}, "")
 
 	// anya пушит товар.
 	doSync(t, h, "ta", map[string]any{
@@ -445,7 +445,7 @@ func TestTenantIsolation(t *testing.T) {
 // Несколько токенов авторизуются, каждый в свой тенант; кривой — 401.
 func TestMultiTokenAuth(t *testing.T) {
 	m := newTestManager(t)
-	h := newMux(m, map[string]string{"t1": "a", "t2": "b"}, "")
+	h := newMux(m, map[string]tenantAuth{"t1": {tenant: "a"}, "t2": {tenant: "b"}}, "")
 	cases := []struct {
 		header string
 		want   int
@@ -476,7 +476,7 @@ func TestTenantPersistenceAndSeq(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := newMux(m1, map[string]string{"ta": "anya", "tb": "bob"}, "")
+	h := newMux(m1, map[string]tenantAuth{"ta": {tenant: "anya"}, "tb": {tenant: "bob"}}, "")
 
 	doSync(t, h, "ta", map[string]any{
 		"since": 0,
@@ -524,7 +524,7 @@ func TestParseTokensFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if m["aaa"] != "anya" || m["bbb"] != "bob" || len(m) != 2 {
+	if m["aaa"] != (tenantAuth{tenant: "anya"}) || m["bbb"] != (tenantAuth{tenant: "bob"}) || len(m) != 2 {
 		t.Fatalf("неверный разбор: %#v", m)
 	}
 
@@ -547,6 +547,30 @@ func TestParseTokensFile(t *testing.T) {
 	}
 }
 
+// Read-only модификатор "ro" после токена помечает tenantAuth.readOnly.
+func TestParseTokensFileReadOnly(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "tokens")
+
+	os.WriteFile(p, []byte("anya: aaa\nbob: bbb ro\n"), 0o600)
+	m, err := parseTokensFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["aaa"] != (tenantAuth{tenant: "anya"}) {
+		t.Fatalf("anya должна быть read-write: %#v", m["aaa"])
+	}
+	if m["bbb"] != (tenantAuth{tenant: "bob", readOnly: true}) {
+		t.Fatalf("bob должен быть read-only: %#v", m["bbb"])
+	}
+
+	// Неизвестный модификатор — ошибка.
+	os.WriteFile(p, []byte("anya: aaa rw\n"), 0o600)
+	if _, err := parseTokensFile(p); err == nil {
+		t.Fatalf("ожидали ошибку на неизвестный модификатор")
+	}
+}
+
 // Обратная совместимость: нет файла → одиночный токен из env как тенант "default".
 func TestLoadTokensEnvFallback(t *testing.T) {
 	t.Setenv("SKLAD_SYNC_TOKEN", "legacy")
@@ -554,7 +578,88 @@ func TestLoadTokensEnvFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(m) != 1 || m["legacy"] != "default" {
+	if len(m) != 1 || m["legacy"] != (tenantAuth{tenant: "default"}) {
 		t.Fatalf("ожидали {legacy:default}, получили %#v", m)
+	}
+}
+
+// ── read-only токены ──────────────────────────────────────────────────────
+
+// Read-only токен читает (pull), но push (непустая коллекция в запросе) — 403,
+// и данные не меняются.
+func TestReadOnlyTokenRejectsPush(t *testing.T) {
+	m := newTestManager(t)
+	h := newMux(m, map[string]tenantAuth{
+		"rw": {tenant: "shop"},
+		"ro": {tenant: "shop", readOnly: true},
+	}, "")
+
+	// rw заводит товар.
+	doSync(t, h, "rw", map[string]any{
+		"since": 0,
+		"items": []Record{rec("x", 100, false, `{"n":1}`)},
+	})
+
+	// ro пустым since видит товар — pull работает.
+	resp := doSync(t, h, "ro", map[string]any{"since": 0})
+	var items []Record
+	json.Unmarshal(resp["items"], &items)
+	if len(items) != 1 {
+		t.Fatalf("read-only токен должен видеть данные тенанта, получили %d записей", len(items))
+	}
+	var respReadOnly bool
+	json.Unmarshal(resp["readOnly"], &respReadOnly)
+	if !respReadOnly {
+		t.Fatalf("ответ read-only токену должен нести readOnly:true, получили %s", resp["readOnly"])
+	}
+
+	// rw в ответе несёт readOnly:false — клиент узнаёт режим проактивно.
+	respRW := doSync(t, h, "rw", map[string]any{"since": 0})
+	var rwReadOnly bool
+	json.Unmarshal(respRW["readOnly"], &rwReadOnly)
+	if rwReadOnly {
+		t.Fatalf("ответ rw токену не должен нести readOnly:true")
+	}
+
+	// ro пытается push — 403, товар не меняется.
+	pushBody, _ := json.Marshal(map[string]any{
+		"since": 0,
+		"items": []Record{rec("x", 200, false, `{"n":2}`)},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/sync", bytes.NewReader(pushBody))
+	req.Header.Set("Authorization", "Bearer ro")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("push от read-only токена: ждали 403, получили %d: %s", w.Code, w.Body.String())
+	}
+	s, _ := m.get("shop")
+	if s.state.Coll["items"]["x"].UpdatedAt != 100 {
+		t.Fatalf("push read-only токена не должен был применяться, товар изменился: %+v", s.state.Coll["items"]["x"])
+	}
+}
+
+// Read-only токен не может wipe.
+func TestReadOnlyTokenRejectsWipe(t *testing.T) {
+	m := newTestManager(t)
+	h := newMux(m, map[string]tenantAuth{
+		"rw": {tenant: "shop"},
+		"ro": {tenant: "shop", readOnly: true},
+	}, "")
+	doSync(t, h, "rw", map[string]any{
+		"since": 0,
+		"items": []Record{rec("x", 100, false, `{}`)},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/wipe", nil)
+	req.Header.Set("Authorization", "Bearer ro")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("wipe от read-only токена: ждали 403, получили %d: %s", w.Code, w.Body.String())
+	}
+	s, _ := m.get("shop")
+	if s.state.Coll["items"]["x"].Deleted {
+		t.Fatalf("wipe read-only токена не должен был применяться")
 	}
 }

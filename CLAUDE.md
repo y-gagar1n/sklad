@@ -19,9 +19,13 @@
   каждого тенанта свой файл данных `-data-dir/<tenantId>.json` и свой `seq` — токен
   A не видит данные токена B. `tenantId` — стабильная метка (файл именуется по ней,
   не по токену), поэтому ротация токена сохраняет склад; на метку можно несколько
-  токенов. Fallback: нет tokens-файла, но задан env `SKLAD_SYNC_TOKEN` → один тенант
-  `default`. Реестр «кто есть кто» — локально `~/.config/sklad-sync/tokens`; управление
-  — `./sklad-tokens.sh {list|add|rotate|remove}` (правит реестр, зеркалит на VM,
+  токенов — например, обычный (read-write) плюс read-only для «посмотреть без
+  права правки» (строка `tenantId: token ro` в tokens-файле; сервер отдаёт pull,
+  но 403-т push и `/wipe` — `backend/main.go`, `requireTenant`/`handleSync`/
+  `handleWipe`). Fallback: нет tokens-файла, но задан env `SKLAD_SYNC_TOKEN` → один
+  тенант `default` (read-write). Реестр «кто есть кто» — локально
+  `~/.config/sklad-sync/tokens`; управление — `./sklad-tokens.sh {list|add|
+  add-token [--ro]|rotate|remove|remove-token}` (правит реестр, зеркалит на VM,
   рестартит сервис — без редеплоя). Ядро слияния от тенантов не зависит.
 
 ## ⛔ Секреты НЕ коммитить
@@ -114,5 +118,6 @@ cd backend && go test -race ./...  # тесты сервера
 
 ./bootstrap-sklad.sh               # разово: секреты на VM (домен+CORS+реестр токенов)
 ./deploy-sklad.sh                  # деплой на VM
-./sklad-tokens.sh add <tenantId>   # завести пользователя (без редеплоя)
+./sklad-tokens.sh add <tenantId>            # завести пользователя (без редеплоя)
+./sklad-tokens.sh add-token <tenantId> --ro # выдать read-only токен тому же складу
 ```
