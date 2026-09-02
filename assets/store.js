@@ -170,11 +170,11 @@ export function categories() {
 export function itemsOf(categoryId) {
   return state.items
     .filter((i) => !i.deleted && i.categoryId === categoryId)
-    .sort((a, b) => a.order - b.order);
+    .sort((a, b) => a.name.localeCompare(b.name, "ru"));
 }
 
 export function allItems() {
-  return state.items.filter((i) => !i.deleted).sort((a, b) => a.order - b.order);
+  return state.items.filter((i) => !i.deleted).sort((a, b) => a.name.localeCompare(b.name, "ru"));
 }
 
 export function getItem(id) {
