@@ -23,6 +23,12 @@
 // Конфликты — last-write-wins по updatedAt, удаления — тумбстоуны. Клиент хранит
 // seq из ответа и шлёт его как since дальше. POST /wipe тумбстоунит всё.
 //
+// LWW-перезапись стирает предыдущее значение записи безвозвратно из основного
+// файла данных — поэтому каждая принятая запись (что было/что стало) заодно
+// дописывается в аудит-лог <data-dir>/<tenantId>.audit.jsonl (см. apply/
+// appendAudit): построчный JSON, не участвует в самой синхронизации, только
+// для ручного восстановления содержимого после случайного тумбстоуна.
+//
 // Защита и многотенантность: /sync и /wipe требуют Authorization: Bearer <токен>.
 // Токен отображается на стабильную метку тенанта (tenantId) через -tokens-file
 // (строки "tenantId: token"); у каждого тенанта свой файл данных <data-dir>/<id>.json
@@ -158,9 +164,17 @@ func (m *StoreManager) get(tenantID string) (*Store, error) {
 }
 
 // apply вливает записи клиента в коллекцию по правилу LWW, возвращает число
-// принятых. Ничья по updatedAt — за инкумбентом.
-func (s *Store) apply(coll map[string]*Record, incoming []Record) int {
+// принятых. Ничья по updatedAt — за инкумбентом. Каждая принятая запись (что
+// было и что стало) уходит в аудит-лог до перезаписи в памяти — state-файл
+// истории не хранит, LWW-перезапись стирает старое значение безвозвратно.
+func (s *Store) apply(collName string, coll map[string]*Record, incoming []Record) int {
 	accepted := 0
+	var auditF *os.File
+	defer func() {
+		if auditF != nil {
+			auditF.Close()
+		}
+	}()
 	for i := range incoming {
 		rec := incoming[i]
 		if rec.ID == "" {
@@ -175,10 +189,55 @@ func (s *Store) apply(coll map[string]*Record, incoming []Record) int {
 		}
 		s.state.Seq++
 		rec.Seq = s.state.Seq
+		if auditF == nil {
+			auditF = s.openAudit()
+		}
+		s.appendAudit(auditF, collName, existing, &rec)
 		coll[rec.ID] = &rec
 		accepted++
 	}
 	return accepted
+}
+
+// auditPath — журнал изменений тенанта рядом с его файлом данных: каждая
+// принятая запись, с тем, что было до неё (JSONL, одна строка на запись). Не
+// участвует в самой синхронизации — только для ручного восстановления, если
+// LWW-перезапись (например, случайный откат к старому бэкапу на клиенте, см.
+// «синтетические тумбстоуны» в assets/sync.js) сотрёт что-то нужное.
+func (s *Store) auditPath() string {
+	return strings.TrimSuffix(s.path, ".json") + ".audit.jsonl"
+}
+
+type auditEntry struct {
+	Time time.Time `json:"time"`
+	Coll string    `json:"coll"`
+	Prev *Record   `json:"prev,omitempty"`
+	Next *Record   `json:"next"`
+}
+
+func (s *Store) openAudit() *os.File {
+	f, err := os.OpenFile(s.auditPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("аудит-лог %s: открытие: %v", s.auditPath(), err)
+		return nil
+	}
+	return f
+}
+
+// appendAudit дописывает одну строку в журнал; ошибки только логирует — аудит
+// не должен ронять сам синк.
+func (s *Store) appendAudit(f *os.File, coll string, prev, next *Record) {
+	if f == nil {
+		return
+	}
+	b, err := json.Marshal(auditEntry{Time: time.Now().UTC(), Coll: coll, Prev: prev, Next: next})
+	if err != nil {
+		log.Printf("аудит-лог %s: маршалинг: %v", s.auditPath(), err)
+		return
+	}
+	if _, err := f.Write(append(b, '\n')); err != nil {
+		log.Printf("аудит-лог %s: запись: %v", s.auditPath(), err)
+	}
 }
 
 func changedSince(coll map[string]*Record, since int64) []Record {
@@ -270,7 +329,7 @@ func (s *Store) handleSync(readOnly bool, w http.ResponseWriter, r *http.Request
 
 	accepted := 0
 	for _, name := range collectionNames {
-		accepted += s.apply(s.state.Coll[name], req.Collections[name])
+		accepted += s.apply(name, s.state.Coll[name], req.Collections[name])
 	}
 	if accepted > 0 {
 		if err := s.save(); err != nil {
@@ -308,6 +367,12 @@ func (s *Store) handleWipe(readOnly bool, w http.ResponseWriter, r *http.Request
 	nowMs := float64(time.Now().UnixMilli())
 	counts := map[string]int{}
 	total := 0
+	var auditF *os.File
+	defer func() {
+		if auditF != nil {
+			auditF.Close()
+		}
+	}()
 	for _, name := range collectionNames {
 		coll := s.state.Coll[name]
 		n := 0
@@ -317,7 +382,12 @@ func (s *Store) handleWipe(readOnly bool, w http.ResponseWriter, r *http.Request
 				ts = rec.UpdatedAt + 1
 			}
 			s.state.Seq++
-			coll[id] = &Record{ID: rec.ID, UpdatedAt: ts, Deleted: true, Seq: s.state.Seq}
+			next := &Record{ID: rec.ID, UpdatedAt: ts, Deleted: true, Seq: s.state.Seq}
+			if auditF == nil {
+				auditF = s.openAudit()
+			}
+			s.appendAudit(auditF, name, rec, next)
+			coll[id] = next
 			n++
 		}
 		counts[name] = n

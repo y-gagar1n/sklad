@@ -65,26 +65,26 @@ func TestApplyLWW(t *testing.T) {
 	coll := s.state.Coll["items"]
 
 	// Новая запись принимается.
-	if n := s.apply(coll, []Record{rec("a", 100, false, `{"name":"Молоко"}`)}); n != 1 {
+	if n := s.apply("items", coll, []Record{rec("a", 100, false, `{"name":"Молоко"}`)}); n != 1 {
 		t.Fatalf("ожидали 1 принятую, получили %d", n)
 	}
 	// Более старая — отвергается.
-	if n := s.apply(coll, []Record{rec("a", 50, false, `{"name":"Старое"}`)}); n != 0 {
+	if n := s.apply("items", coll, []Record{rec("a", 50, false, `{"name":"Старое"}`)}); n != 0 {
 		t.Fatalf("старую запись не должны принимать, приняли %d", n)
 	}
 	// Равная метка — за инкумбентом (ничью не принимаем).
-	if n := s.apply(coll, []Record{rec("a", 100, false, `{"name":"Ничья"}`)}); n != 0 {
+	if n := s.apply("items", coll, []Record{rec("a", 100, false, `{"name":"Ничья"}`)}); n != 0 {
 		t.Fatalf("ничью не должны принимать, приняли %d", n)
 	}
 	// Более свежая — принимается.
-	if n := s.apply(coll, []Record{rec("a", 200, false, `{"name":"Новое"}`)}); n != 1 {
+	if n := s.apply("items", coll, []Record{rec("a", 200, false, `{"name":"Новое"}`)}); n != 1 {
 		t.Fatalf("свежую должны принять")
 	}
 	if got := string(coll["a"].Data); got != `{"name":"Новое"}` {
 		t.Fatalf("данные не обновились: %s", got)
 	}
 	// Пустой id игнорируется.
-	if n := s.apply(coll, []Record{rec("", 300, false, `{}`)}); n != 0 {
+	if n := s.apply("items", coll, []Record{rec("", 300, false, `{}`)}); n != 0 {
 		t.Fatalf("пустой id не должен приниматься")
 	}
 }
@@ -92,8 +92,8 @@ func TestApplyLWW(t *testing.T) {
 func TestApplyTombstoneClearsData(t *testing.T) {
 	s := newTestStore(t)
 	coll := s.state.Coll["items"]
-	s.apply(coll, []Record{rec("a", 100, false, `{"name":"Молоко"}`)})
-	s.apply(coll, []Record{rec("a", 200, true, `{"name":"должно исчезнуть"}`)})
+	s.apply("items", coll, []Record{rec("a", 100, false, `{"name":"Молоко"}`)})
+	s.apply("items", coll, []Record{rec("a", 200, true, `{"name":"должно исчезнуть"}`)})
 	if coll["a"].Data != nil {
 		t.Fatalf("у тумбстоуна data должна быть nil, получили %s", coll["a"].Data)
 	}
@@ -102,14 +102,54 @@ func TestApplyTombstoneClearsData(t *testing.T) {
 	}
 }
 
+// Аудит-лог: каждая принятая запись пишется в <path без .json>.audit.jsonl с
+// тем, что было (prev) и что стало (next) — так можно восстановить содержимое
+// записи, которую LWW-перезапись (например, тумбстоун) стёрла из state-файла.
+func TestApplyAuditLog(t *testing.T) {
+	s := newTestStore(t)
+	coll := s.state.Coll["items"]
+
+	s.apply("items", coll, []Record{rec("a", 100, false, `{"name":"Молоко"}`)})
+	s.apply("items", coll, []Record{rec("a", 200, true, `{"name":"неважно"}`)}) // тумбстоун поверх
+
+	raw, err := os.ReadFile(s.auditPath())
+	if err != nil {
+		t.Fatalf("не удалось прочитать аудит-лог: %v", err)
+	}
+	lines := bytes.Split(bytes.TrimRight(raw, "\n"), []byte("\n"))
+	if len(lines) != 2 {
+		t.Fatalf("ожидали 2 строки аудита, получили %d: %s", len(lines), raw)
+	}
+
+	var first, second auditEntry
+	if err := json.Unmarshal(lines[0], &first); err != nil {
+		t.Fatalf("не распарсили первую строку: %v", err)
+	}
+	if err := json.Unmarshal(lines[1], &second); err != nil {
+		t.Fatalf("не распарсили вторую строку: %v", err)
+	}
+
+	if first.Coll != "items" || first.Prev != nil || first.Next == nil || string(first.Next.Data) != `{"name":"Молоко"}` {
+		t.Fatalf("первая запись аудита не та: %+v", first)
+	}
+	// Ключевое: после тумбстоуна Next.Data пуст (как и в самом сторе), но Prev
+	// хранит то, что было ДО удаления — именно это и позволяет восстановить.
+	if second.Prev == nil || string(second.Prev.Data) != `{"name":"Молоко"}` {
+		t.Fatalf("аудит не сохранил содержимое перед тумбстоуном: %+v", second)
+	}
+	if second.Next == nil || !second.Next.Deleted || second.Next.Data != nil {
+		t.Fatalf("вторая запись аудита должна быть тумбстоуном без data: %+v", second)
+	}
+}
+
 // ── changedSince ────────────────────────────────────────────────────────────
 
 func TestChangedSinceOrderAndCursor(t *testing.T) {
 	s := newTestStore(t)
 	coll := s.state.Coll["items"]
-	s.apply(coll, []Record{rec("a", 10, false, `{}`)}) // seq 1
-	s.apply(coll, []Record{rec("b", 20, false, `{}`)}) // seq 2
-	s.apply(coll, []Record{rec("c", 30, false, `{}`)}) // seq 3
+	s.apply("items", coll, []Record{rec("a", 10, false, `{}`)}) // seq 1
+	s.apply("items", coll, []Record{rec("b", 20, false, `{}`)}) // seq 2
+	s.apply("items", coll, []Record{rec("c", 30, false, `{}`)}) // seq 3
 
 	all := changedSince(coll, 0)
 	if len(all) != 3 {
@@ -232,6 +272,19 @@ func TestWipeTombstonesAll(t *testing.T) {
 	// updatedAt тумбстоуна должен превышать прежний (max(now, existing+1)).
 	if s.state.Coll["items"]["a"].UpdatedAt <= 100 {
 		t.Fatalf("updatedAt тумбстоуна должен вырасти")
+	}
+	// wipe тоже проходит через аудит-лог — содержимое до тумбстоуна не теряется.
+	raw, err := os.ReadFile(s.auditPath())
+	if err != nil {
+		t.Fatalf("не удалось прочитать аудит-лог: %v", err)
+	}
+	lines := bytes.Split(bytes.TrimRight(raw, "\n"), []byte("\n"))
+	var last auditEntry
+	if err := json.Unmarshal(lines[len(lines)-1], &last); err != nil {
+		t.Fatalf("не распарсили последнюю строку аудита: %v", err)
+	}
+	if last.Prev == nil || string(last.Prev.Data) != `{"n":1}` {
+		t.Fatalf("аудит wipe не сохранил содержимое перед тумбстоуном: %+v", last)
 	}
 }
 
