@@ -740,3 +740,75 @@ func TestReadOnlyTokenRejectsWipe(t *testing.T) {
 		t.Fatalf("wipe read-only токена не должен был применяться")
 	}
 }
+
+// ── /client-logs ─────────────────────────────────────────────────────────────
+
+func postClientLogs(t *testing.T, h http.Handler, token string, entries string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `{"entries":[` + entries + `]}`
+	req := httptest.NewRequest(http.MethodPost, "/client-logs", bytes.NewReader([]byte(body)))
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func TestClientLogsAppendsJSONL(t *testing.T) {
+	s := newTestStore(t)
+	h := muxFor(s, "secret")
+
+	w := postClientLogs(t, h, "secret", `{"t":1,"event":"sync-push","movements":{"n":34,"del":34}}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ждали 200, получили %d: %s", w.Code, w.Body.String())
+	}
+
+	raw, err := os.ReadFile(s.clientLogPath())
+	if err != nil {
+		t.Fatalf("не удалось прочитать %s: %v", s.clientLogPath(), err)
+	}
+	lines := bytes.Split(bytes.TrimRight(raw, "\n"), []byte("\n"))
+	if len(lines) != 1 {
+		t.Fatalf("ждали 1 строку, получили %d: %s", len(lines), raw)
+	}
+	var got struct {
+		RemoteAddr string            `json:"remoteAddr"`
+		Entries    []json.RawMessage `json:"entries"`
+	}
+	if err := json.Unmarshal(lines[0], &got); err != nil {
+		t.Fatalf("строка — не JSON: %v", err)
+	}
+	if len(got.Entries) != 1 || !bytes.Contains(got.Entries[0], []byte("sync-push")) {
+		t.Fatalf("сущность батча потерялась: %+v", got)
+	}
+
+	// Второй батч — дописывается новой строкой, не перезаписывает первую.
+	postClientLogs(t, h, "secret", `{"t":2,"event":"import-json"}`)
+	raw2, _ := os.ReadFile(s.clientLogPath())
+	if n := len(bytes.Split(bytes.TrimRight(raw2, "\n"), []byte("\n"))); n != 2 {
+		t.Fatalf("ждали 2 строки после второго батча, получили %d", n)
+	}
+}
+
+// Read-only токен тоже может слать логи — это диагностика, не складские данные.
+func TestClientLogsAllowsReadOnlyToken(t *testing.T) {
+	s := newTestStore(t)
+	h := newMux(&StoreManager{stores: map[string]*Store{"default": s}}, map[string]tenantAuth{
+		"ro": {tenant: "default", readOnly: true},
+	}, "")
+	w := postClientLogs(t, h, "ro", `{"t":1,"event":"sync-error"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("read-only токен должен уметь слать логи, получили %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestClientLogsRejectsEmpty(t *testing.T) {
+	s := newTestStore(t)
+	h := muxFor(s, "secret")
+	req := httptest.NewRequest(http.MethodPost, "/client-logs", bytes.NewReader([]byte(`{"entries":[]}`)))
+	req.Header.Set("Authorization", "Bearer secret")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("пустой entries: ждали 400, получили %d", w.Code)
+	}
+}

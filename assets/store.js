@@ -3,6 +3,7 @@
 // сервером. Для синка у каждой записи есть updatedAt(ms) и флаг deleted
 // (тумбстоун вместо жёсткого удаления), конфликты решаются LWW по updatedAt.
 import { stockOf, todayISO, addDays, round2 } from "./calc.js";
+import * as oplog from "./oplog.js";
 
 const KEY = "sklad-state-v1";
 const VERSION = 2;
@@ -518,15 +519,31 @@ export function exportJSON() {
   return JSON.stringify(state, null, 2);
 }
 
+// Счётчики коллекций для oplog — операции ниже заменяют state целиком, и
+// именно скачок этих чисел (особенно movements) — первый сигнал при разборе
+// инцидента синка.
+function counts(s) {
+  return {
+    categories: s.categories.length,
+    items: s.items.length,
+    floors: s.floors.length,
+    movements: s.movements.length,
+  };
+}
+
 export function importJSON(text) {
+  const before = counts(state);
   const parsed = JSON.parse(text);
   state = normalize(parsed);
   persist();
+  oplog.log("import-json", { before, after: counts(state) });
 }
 
 export function replaceState(newState) {
+  const before = counts(state);
   state = normalize(newState);
   persist();
+  oplog.log("replace-state", { before, after: counts(state) });
 }
 
 // ── Синхронизация: запись как {id, updatedAt, deleted, data} ───────────────
@@ -624,6 +641,7 @@ export function replaceFromServerRecords(per) {
 
 // ── Импорт разобранного Excel (заменяет все данные) ───────────────────────
 export function importFromParsed(parsed, today = todayISO()) {
+  const before = counts(state);
   state = defaultState();
 
   const def = state.floors[0];
@@ -689,11 +707,13 @@ export function importFromParsed(parsed, today = todayISO()) {
   }
   state.activeFloorId = def.id;
   persist();
+  oplog.log("import-xlsx", { before, after: counts(state) });
 }
 
 // ── Демо-данные ────────────────────────────────────────────────────────────
 
 export function seedDemo() {
+  const before = counts(state);
   state = defaultState();
 
   const c1 = addCategory("Молочные продукты");
@@ -730,6 +750,7 @@ export function seedDemo() {
     }
   }
   persist();
+  oplog.log("seed-demo", { before, after: counts(state) });
 }
 
 function shift(iso, days) {

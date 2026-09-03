@@ -65,9 +65,23 @@ function bearer(opts) {
   return raw.startsWith("Bearer ") ? raw.slice(7) : "";
 }
 
+// Батчи, присланные на /client-logs — по токену, для проверки sendLogs().
+const clientLogs = new Map();
+
 // fetch-шим поверх моделей тенантов.
 globalThis.fetch = async (url, opts = {}) => {
   if (url.endsWith("/health")) return { ok: true, status: 200 };
+  if (url.endsWith("/client-logs")) {
+    const token = bearer(opts);
+    if (!token) return { ok: false, status: 401, json: async () => ({}) };
+    const body = JSON.parse(opts.body || "{}");
+    if (!Array.isArray(body.entries) || !body.entries.length) {
+      return { ok: false, status: 400, json: async () => ({}) };
+    }
+    if (!clientLogs.has(token)) clientLogs.set(token, []);
+    clientLogs.get(token).push(...body.entries);
+    return { ok: true, status: 200, json: async () => ({ ok: true }) };
+  }
   if (url.endsWith("/sync") || url.endsWith("/wipe")) {
     const token = bearer(opts);
     if (!token) return { ok: false, status: 401, json: async () => ({}) };
@@ -97,14 +111,17 @@ globalThis.fetch = async (url, opts = {}) => {
 
 const store = await import("../assets/store.js");
 const sync = await import("../assets/sync.js");
+const oplog = await import("../assets/oplog.js");
 
 function fresh() {
   mem.clear();
   tenants.clear();
   roTokens.clear();
+  clientLogs.clear();
   server = serverFor("t"); // тенант токена "t" — с ним работает клиент по умолчанию
   store.replaceState({});
   sync.resetSyncState();
+  oplog.clear();
   sync.setConfig({ url: "https://x.example", token: "t" });
 }
 
@@ -409,4 +426,67 @@ test("сервер изолирует данные по токену; без т�
   // Без Authorization — 401.
   const rNo = await fetch(url, { method: "POST", headers: {}, body: "{}" });
   assert.equal(rNo.status, 401);
+});
+
+// ── oplog: локальный журнал операций синка ─────────────────────────────────
+
+test("syncNow пишет в oplog состав push (включая долю тумбстоунов)", async () => {
+  fresh();
+  const c = store.addCategory("Молоко");
+  const it = store.addItem(c.id, { name: "Коровье", unit: "л" });
+  store.addMovement(it.id, { type: "in", qty: 10 });
+  await sync.syncNow();
+
+  const events = oplog.getAll().map((e) => e.event);
+  assert.ok(events.includes("sync-push"), `ждали sync-push среди ${events}`);
+  const push = oplog.getAll().find((e) => e.event === "sync-push");
+  assert.equal(push.movements.n, 1);
+  assert.ok(!push.movements.del, "обычное создание — не тумбстоун");
+});
+
+test("computePush-тумбстоун виден в oplog как del — ровно то, что искали при разборе инцидента", async () => {
+  fresh();
+  const it = store.addItem(store.addCategory("Кофе").id, { name: "Синяя упаковка", unit: "шт" });
+  const m = store.addMovement(it.id, { type: "in", qty: 5 });
+  await sync.syncNow(); // движение уехало на сервер, снимок его знает
+
+  // Имитируем «откат к старому бэкапу»: движение пропало из локальных данных,
+  // но снимок синка всё ещё помнит его id (см. computePush).
+  store.replaceState({
+    categories: store.exportRecords().categories.map((r) => ({ id: r.id, ...r.data, updatedAt: r.updatedAt, deleted: r.deleted })),
+  });
+  oplog.clear(); // сам replaceState тоже пишет в oplog — не мешаем следующей проверке
+  await sync.syncNow();
+
+  const push = oplog.getAll().find((e) => e.event === "sync-push");
+  assert.ok(push, "ждали sync-push после отката");
+  assert.equal(push.movements.del, 1, "пропавшее движение должно уйти тумбстоуном — и это видно в oplog");
+});
+
+test("pullReplace пишет в oplog сводку того, что пришло с сервера", async () => {
+  fresh();
+  server.apply("items", [{ id: "x", updatedAt: 100, deleted: false, data: { name: "Чай" } }]);
+  await sync.pullReplace();
+  const pull = oplog.getAll().find((e) => e.event === "pull-replace");
+  assert.ok(pull, "ждали pull-replace в oplog");
+  assert.equal(pull.items.n, 1);
+});
+
+test("sendLogs: пустой журнал — не шлём запрос, честно говорим 'empty'", async () => {
+  fresh();
+  const r = await sync.sendLogs();
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "empty");
+});
+
+test("sendLogs: непустой журнал уезжает на /client-logs тем же токеном", async () => {
+  fresh();
+  oplog.log("sync-error", { message: "таймаут" });
+  oplog.log("wipe", { before: { movements: 5 } });
+
+  const r = await sync.sendLogs();
+  assert.equal(r.ok, true);
+  assert.equal(r.count, 2);
+  assert.equal(clientLogs.get("t").length, 2);
+  assert.equal(clientLogs.get("t")[0].event, "sync-error");
 });

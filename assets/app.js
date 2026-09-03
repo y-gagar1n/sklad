@@ -1051,6 +1051,9 @@ function renderSettings() {
       <div class="divider"></div>
       <p class="hint" style="margin-top:0">Второе устройство (чтобы забрать данные с сервера, стерев локальные):</p>
       <button class="btn secondary block" data-act="sync-pull">⬇️ Заменить локальные данными с сервера</button>
+      <div class="divider"></div>
+      <p class="hint" style="margin-top:0">Если что-то пошло не так с синком — отправьте журнал операций этого устройства, так проще разобраться, что случилось.</p>
+      <button class="btn secondary block" data-act="send-logs">🪵 Отправить логи</button>
     </div>`
     }
 
@@ -1832,6 +1835,14 @@ async function runPullReplace() {
   toast(r.ok ? "Данные загружены с сервера" : "Ошибка: " + (r.error || ""));
 }
 
+async function runSendLogs() {
+  if (!sync.isConfigured()) return toast("Сначала задайте адрес и токен");
+  const r = await sync.sendLogs();
+  if (r.ok) return toast(`Отправлено записей: ${r.count}`);
+  if (r.reason === "empty") return toast("Журнал пуст — нечего отправлять");
+  toast("Ошибка: " + (r.error || r.reason || ""));
+}
+
 function importData(file) {
   // В отличие от wipe и «заменить данные с сервера» тут раньше не было
   // подтверждения — случайный выбор старого файла-бэкапа в пикере молча
@@ -1906,6 +1917,7 @@ document.addEventListener("click", (e) => {
   if (act === "sync-save") return saveSyncConfig();
   if (act === "sync-now") return runSyncNow();
   if (act === "sync-pull") return runPullReplace();
+  if (act === "send-logs") return runSendLogs();
   if (act === "export") return exportData();
   if (act === "import") return guardWritable() && $("#import-file").click();
   if (act === "import-xlsx") return guardWritable() && $("#xlsx-file").click();

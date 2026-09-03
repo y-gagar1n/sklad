@@ -18,10 +18,25 @@
 //                        (см. isServerReadOnly в app.js).
 //   sklad-syncstate-v1   { lastSeq, snapshot: { coll: { id: updatedAt } } }
 import * as store from "./store.js";
+import * as oplog from "./oplog.js";
 
 const CONFIG_KEY = "sklad-sync-config";
 const STATE_KEY = "sklad-syncstate-v1";
 const COLLECTIONS = ["categories", "items", "floors", "movements", "settings"];
+
+// Компактная сводка набора записей для oplog: только непустые коллекции,
+// живые записи и тумбстоуны — отдельными счётчиками, без самого содержимого
+// (см. oplog.js — журнал не должен раздуваться содержимым записей).
+function summarize(recs) {
+  const out = {};
+  for (const name of COLLECTIONS) {
+    const arr = recs[name] || [];
+    if (!arr.length) continue;
+    const del = arr.reduce((n, r) => n + (r.deleted ? 1 : 0), 0);
+    out[name] = del ? { n: arr.length, del } : { n: arr.length };
+  }
+  return out;
+}
 
 // ── Конфиг (адрес сервера + токен) ─────────────────────────────────────────
 
@@ -250,6 +265,10 @@ export async function syncNow() {
       if (!skipPush) {
         for (const name of COLLECTIONS) body[name] = push[name];
       }
+      const pushSummary = summarize(push);
+      if (Object.keys(pushSummary).length) {
+        oplog.log("sync-push", { since: ss.lastSeq, skipped: !!skipPush, ...pushSummary });
+      }
 
       const resp = await postSync(cfg, body);
       rememberReadOnly(resp.readOnly);
@@ -257,6 +276,10 @@ export async function syncNow() {
       // Вливаем серверную дельту (LWW) — включая наши же эхо-записи.
       const per = {};
       for (const name of COLLECTIONS) per[name] = resp[name] || [];
+      const pullSummary = summarize(per);
+      if (Object.keys(pullSummary).length) {
+        oplog.log("sync-pull", { seq: resp.seq, ...pullSummary });
+      }
       store.applyServerRecords(per);
 
       // Снимок: если реально пушили — текущие локальные записи (после слияния
@@ -274,6 +297,7 @@ export async function syncNow() {
       return { ok: true, seq: resp.seq, pushed: !skipPush && hasAny(push) };
     } catch (e) {
       setStatus({ syncing: false, lastError: e.message || String(e) });
+      oplog.log("sync-error", { message: e.message || String(e) });
       return { ok: false, reason: "error", error: e.message || String(e) };
     } finally {
       inFlight = null;
@@ -292,6 +316,7 @@ export async function pullReplace() {
     rememberReadOnly(resp.readOnly);
     const per = {};
     for (const name of COLLECTIONS) per[name] = resp[name] || [];
+    oplog.log("pull-replace", summarize(per));
     store.replaceFromServerRecords(per);
     saveSyncState({
       lastSeq: resp.seq || 0,
@@ -329,5 +354,27 @@ export async function testConnection(url, token) {
     return { ok: true, readOnly: !!resp.readOnly };
   } catch (e) {
     return { ok: false, error: e.message || String(e) };
+  }
+}
+
+// Отправить локальный журнал операций (oplog.js) на сервер — для расследования
+// случаев вроде «данные пропали после синка» (см. историю тумбстоунов от
+// случайного импорта старого бэкапа). Работает и с read-only токеном: это
+// диагностика, а не запись складских данных, /client-logs её не различает.
+export async function sendLogs() {
+  if (!isConfigured()) return { ok: false, reason: "not-configured" };
+  const entries = oplog.getAll();
+  if (!entries.length) return { ok: false, reason: "empty" };
+  const cfg = getConfig();
+  try {
+    const resp = await fetch(cfg.url + "/client-logs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + cfg.token },
+      body: JSON.stringify({ entries }),
+    });
+    if (!resp.ok) return { ok: false, reason: "http-" + resp.status };
+    return { ok: true, count: entries.length };
+  } catch (e) {
+    return { ok: false, reason: "error", error: e.message || String(e) };
   }
 }

@@ -29,6 +29,13 @@
 // appendAudit): построчный JSON, не участвует в самой синхронизации, только
 // для ручного восстановления содержимого после случайного тумбстоуна.
 //
+// POST /client-logs — приёмник локального журнала клиента (assets/oplog.js,
+// кнопка «Отправить логи» в Настройках): { "entries": [...] } дописывается в
+// <data-dir>/<tenantId>.client.jsonl. Дополняет аудит-лог: тот видит, что
+// сервер ПРИНЯЛ, этот — что клиент видел у себя ДО отправки (импорт старого
+// бэкапа, wipe, из чего состоял push). requireTenant тут не различает
+// read-only — это диагностика, а не складские данные.
+//
 // Защита и многотенантность: /sync и /wipe требуют Authorization: Bearer <токен>.
 // Токен отображается на стабильную метку тенанта (tenantId) через -tokens-file
 // (строки "tenantId: token"); у каждого тенанта свой файл данных <data-dir>/<id>.json
@@ -409,6 +416,65 @@ func (s *Store) handleWipe(readOnly bool, w http.ResponseWriter, r *http.Request
 	_ = json.NewEncoder(w).Encode(out)
 }
 
+// clientLogPath — журнал локальных операций клиента (см. assets/oplog.js,
+// sync.sendLogs), присланный кнопкой «Отправить логи». Отдельный файл от
+// audit-лога (тот — что реально принял сервер; этот — что клиент видел у
+// себя до отправки: импорты/wipe/состав push'а), рядом с данными тенанта.
+func (s *Store) clientLogPath() string {
+	return strings.TrimSuffix(s.path, ".json") + ".client.jsonl"
+}
+
+// handleClientLogs дописывает присланный батч в clientLogPath() одной строкой
+// (JSONL). Не различает read-only токен — это диагностика, не складские
+// данные, sync.sendLogs зовёт её тем же токеном, что и /sync.
+func (s *Store) handleClientLogs(_ bool, w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Entries []json.RawMessage `json:"entries"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		http.Error(w, "bad request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if len(body.Entries) == 0 {
+		http.Error(w, "bad request: entries пуст", http.StatusBadRequest)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	f, err := os.OpenFile(s.clientLogPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		log.Printf("клиентский лог %s: открытие: %v", s.clientLogPath(), err)
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	line, err := json.Marshal(map[string]any{
+		"time":       time.Now().UTC(),
+		"remoteAddr": r.RemoteAddr,
+		"entries":    body.Entries,
+	})
+	if err != nil {
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		log.Printf("клиентский лог %s: запись: %v", s.clientLogPath(), err)
+		http.Error(w, "storage error", http.StatusInternalServerError)
+		return
+	}
+
+	log.Printf("client-logs %s: entries=%d", r.RemoteAddr, len(body.Entries))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+}
+
 // tenantAuth — то, во что резолвится bearer-токен: стабильная метка тенанта плюс
 // режим доступа. Read-only токен может pull'ить (видит все данные тенанта), но
 // не может push'ить изменения и не может wipe — см. handleSync/handleWipe.
@@ -597,6 +663,7 @@ func newMux(m *StoreManager, tokenToTenant map[string]tenantAuth, staticDir stri
 	mux := http.NewServeMux()
 	mux.HandleFunc("/sync", requireTenant(tokenToTenant, m, (*Store).handleSync))
 	mux.HandleFunc("/wipe", requireTenant(tokenToTenant, m, (*Store).handleWipe))
+	mux.HandleFunc("/client-logs", requireTenant(tokenToTenant, m, (*Store).handleClientLogs))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
