@@ -399,7 +399,9 @@ func validTenantID(s string) bool {
 	return true
 }
 
-// parseTokensFile читает строки "tenantId: token" (# — комментарий, пустые строки
+// parseTokensFile читает строки "tenantId: token" (# и всё после — комментарий,
+// хоть с начала строки, хоть в хвосте после токена — так локальный алиас
+// "tenantId: token ro  # кому выдан" не ломает разбор; пустые строки
 // пропускаются) в карту token→tenantAuth. После токена можно указать модификатор
 // "ro" ("tenantId: token ro") — тогда токен даёт только чтение (pull), без
 // push/wipe. Дубли токенов и кривые метки — ошибка.
@@ -410,8 +412,11 @@ func parseTokensFile(path string) (map[string]tenantAuth, error) {
 	}
 	out := map[string]tenantAuth{}
 	for i, line := range strings.Split(string(raw), "\n") {
+		if idx := strings.Index(line, "#"); idx >= 0 {
+			line = line[:idx]
+		}
 		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" {
 			continue
 		}
 		idx := strings.Index(line, ":")

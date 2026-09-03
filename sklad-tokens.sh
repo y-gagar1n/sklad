@@ -20,12 +20,15 @@
 # «Чей это токен?» — просто загляни в реестр:  grep <имя> ~/.config/sklad-sync/tokens
 #
 # Использование:
-#   ./sklad-tokens.sh list                          # показать тенантов и токены
-#   ./sklad-tokens.sh add         <tenantId>        # создать тенанта + новый токен
-#   ./sklad-tokens.sh add-token   <tenantId> [--ro]  # ещё один токен тенанту (--ro — только чтение)
-#   ./sklad-tokens.sh rotate      <tenantId>        # сменить токен (склад сохраняется; только если токен один)
+#   ./sklad-tokens.sh list                                       # показать тенантов и токены
+#   ./sklad-tokens.sh add         <tenantId> [--label текст]     # создать тенанта + новый токен
+#   ./sklad-tokens.sh add-token   <tenantId> [--ro] [--label текст]  # ещё один токен (--ro — только чтение)
+#   ./sklad-tokens.sh rotate      <tenantId> [--label текст]     # сменить токен (склад сохраняется; только если токен один; без --label алиас сохраняется как был)
 #   ./sklad-tokens.sh remove      <tenantId>        # отозвать ВСЕ токены тенанта (файл данных остаётся)
 #   ./sklad-tokens.sh remove-token <token>          # отозвать один конкретный токен (напр. один read-only)
+# --label текст — алиас токена (кому/на каком устройстве), пишется как "# текст"
+#   в конце строки реестра — виден в list, сервер его игнорирует.
+# --force — обойти guard_no_silent_drop (см. ниже) и всё равно перезаписать реестр на VM.
 # Хост VM: env SKLAD_REMOTE (по умолчанию yury-timofeev@213.165.212.180).
 #
 # ⛔ Токены — секрет: реестр не коммитить (он и так вне репозитория).
@@ -33,6 +36,7 @@ set -euo pipefail
 
 REMOTE="${SKLAD_REMOTE:-yury-timofeev@213.165.212.180}"
 REG="${SKLAD_SYNC_TOKENS_FILE:-$HOME/.config/sklad-sync/tokens}"
+FORCE="${FORCE:-0}"
 
 gen_token() { head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 40; }
 valid_id()  { [[ "$1" =~ ^[a-z0-9_-]{1,64}$ ]]; }
@@ -72,6 +76,71 @@ id_count() {
 has_id()      { [ "$(id_count "$1")" -gt 0 ]; }
 active_count() { grep -cvE '^[[:space:]]*(#|$)' "$REG" 2>/dev/null || echo 0; }
 
+# Строка реестра для tenantId+токена: "id: token[ ro][  # label]". Чистая
+# функция — используется и при выдаче токена, и в тестах.
+token_line() {
+    local id="$1" tok="$2" ro="$3" label="$4" comment=""
+    [ -n "$label" ] && comment="  # $label"
+    printf '%s: %s%s%s\n' "$id" "$tok" "$ro" "$comment"
+}
+
+# Текущий алиас (комментарий после "#") строки тенанта id в файле, пусто если
+# нет. Используется rotate, чтобы не терять алиас при смене токена.
+label_of() {
+    local file="$1" id="$2"
+    awk -F: -v id="$id" '
+        /^[[:space:]]*#/ { next }
+        { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k)
+          if (k==id) { n=index($0,"#"); if (n>0) { print substr($0,n+1); exit } }
+        }' "$file" | sed 's/^[[:space:]]*//'
+}
+
+# Уникальные tenantId'ы файла реестра, по одному на строку. Комментарии игнорируются.
+ids_in_file() {
+    awk -F: '
+        /^[[:space:]]*#/ { next }
+        { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k); if (k!="") print k }
+    ' "$1" | sort -u
+}
+
+# tenantId'ы, которые есть в remote_file, но отсутствуют в local_file — то есть
+# пропадут, если remote_file заменить содержимым local_file. Остальные
+# аргументы — id'ы, которые эта команда и так намеренно убирает (remove/
+# remove-token), их из результата исключаем.
+dropped_ids() {
+    local remote_file="$1" local_file="$2"; shift 2
+    local expected="$*" local_ids id
+    local_ids="$(ids_in_file "$local_file")"
+    while IFS= read -r id; do
+        [ -z "$id" ] && continue
+        grep -qxF "$id" <<<"$local_ids" && continue
+        printf '%s\n' "$expected" | grep -qxF "$id" && continue
+        printf '%s\n' "$id"
+    done <<<"$(ids_in_file "$remote_file")"
+}
+
+# Не даёт зеркалировать локальный реестр на VM, если это молча сотрёт токены
+# тенанта, о котором локальный реестр не знает (инцидент: локальный реестр на
+# новой машине был пуст, add затёр на VM токен уже жившего там тенанта
+# 'nastya'). $@ — id'ы, намеренно убираемые этой командой (remove/remove-token).
+guard_no_silent_drop() {
+    [ "$FORCE" = "1" ] && return 0
+    local snap dropped
+    snap="$(mktemp)"
+    if ! ssh "$REMOTE" 'sudo -n cat /etc/sklad-sync/tokens 2>/dev/null' > "$snap" 2>/dev/null; then
+        rm -f "$snap"
+        return 0
+    fi
+    dropped="$(dropped_ids "$snap" "$REG" "$*")"
+    rm -f "$snap"
+    if [ -n "$dropped" ]; then
+        echo "ОТКАЗ: на VM есть тенант(ы), которых нет в локальном реестре — зеркалирование их сотрёт:" >&2
+        echo "$dropped" | sed 's/^/    /' >&2
+        echo "Сверь локальный реестр с сервером или передай --force, чтобы всё равно перезаписать." >&2
+        exit 1
+    fi
+}
+
 mirror_and_restart() {
     echo "==> Зеркалю реестр на $REMOTE:/etc/sklad-sync/tokens и рестартю сервис"
     local remotetmp="/tmp/sklad-tokens.$$"
@@ -94,7 +163,24 @@ fi
 REMOTE_EOF
 }
 
+# Диспетчер команд — только при прямом запуске. При `source` (так тесты
+# переиспользуют ids_in_file/dropped_ids/guard_no_silent_drop) не выполняется,
+# иначе `exit` из ветки `*)` убил бы процесс теста.
+[ "${BASH_SOURCE[0]}" = "${0}" ] || return 0
+
 cmd="${1:-}"; shift || true
+FORCE=0
+LABEL=""
+args=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --force) FORCE=1; shift ;;
+        --label) LABEL="${2:-}"; shift 2 ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+set -- "${args[@]}"
+[[ "$LABEL" == *$'\n'* ]] && { echo "--label не должен содержать перенос строки" >&2; exit 1; }
 case "$cmd" in
     list)
         ensure_reg
@@ -111,19 +197,21 @@ case "$cmd" in
         ensure_reg
         has_id "$id" && { echo "тенант '$id' уже есть — для смены токена: $0 rotate $id, для ещё одного: $0 add-token $id" >&2; exit 1; }
         tok="$(gen_token)"
-        printf '%s: %s\n' "$id" "$tok" >> "$REG"
+        token_line "$id" "$tok" "" "$LABEL" >> "$REG"
+        guard_no_silent_drop
         mirror_and_restart
         echo "==> Добавлен тенант '$id'. Токен (ввести в приложении: «Ещё» → «Синхронизация»):"
         echo "    $tok"
         ;;
     add-token)
-        id="${1:?использование: $0 add-token <tenantId> [--ro]}"
+        id="${1:?использование: $0 add-token <tenantId> [--ro] [--label текст]}"
         ro=""
         if [ "${2:-}" = "--ro" ]; then ro=" ro"; fi
         ensure_reg
         has_id "$id" || { echo "нет тенанта '$id' — сначала: $0 add $id" >&2; exit 1; }
         tok="$(gen_token)"
-        printf '%s: %s%s\n' "$id" "$tok" "$ro" >> "$REG"
+        token_line "$id" "$tok" "$ro" "$LABEL" >> "$REG"
+        guard_no_silent_drop
         mirror_and_restart
         if [ -n "$ro" ]; then
             echo "==> Добавлен read-only токен тенанта '$id' (только чтение, без записи/wipe):"
@@ -143,13 +231,16 @@ case "$cmd" in
         fi
         ro_suffix=""
         [ "$(id_readonly "$id")" = "1" ] && ro_suffix=" ro"
+        [ -z "$LABEL" ] && LABEL="$(label_of "$REG" "$id")"
         tok="$(gen_token)"
+        newline="$(token_line "$id" "$tok" "$ro_suffix" "$LABEL")"
         tmp="$(mktemp)"
-        awk -F: -v id="$id" -v tok="$tok" -v ro="$ro_suffix" '
+        awk -F: -v id="$id" -v newline="$newline" '
             /^[[:space:]]*#/ { print; next }
             { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k)
-              if (k==id) print id": "tok ro; else print }' "$REG" > "$tmp"
+              if (k==id) print newline; else print }' "$REG" > "$tmp"
         mv "$tmp" "$REG"; chmod 600 "$REG"
+        guard_no_silent_drop
         mirror_and_restart
         echo "==> Токен тенанта '$id' обновлён; старый больше не действует. Новый токен:"
         echo "    $tok"
@@ -171,6 +262,7 @@ case "$cmd" in
             exit 1
         fi
         mv "$tmp" "$REG"; chmod 600 "$REG"
+        guard_no_silent_drop "$id"
         mirror_and_restart
         echo "==> Тенант '$id' отозван — ВСЕ его токены (включая read-only) больше не действуют."
         echo "    Файл данных на VM остался: /var/lib/sklad-sync/tenants/$id.json (удали вручную при необходимости)."
@@ -178,6 +270,13 @@ case "$cmd" in
     remove-token)
         tok="${1:?использование: $0 remove-token <token>}"
         ensure_reg
+        # tenantId этого токена — если это был его последний токен, id пропадёт
+        # из реестра; предупреждаем guard_no_silent_drop, что это ожидаемо.
+        removed_id="$(awk -F: -v tok="$tok" '
+            /^[[:space:]]*#/ { next }
+            { k=$1; gsub(/^[[:space:]]+|[[:space:]]+$/,"",k)
+              rest=$2; gsub(/^[[:space:]]+|[[:space:]]+$/,"",rest); split(rest,a," ")
+              if (a[1]==tok) print k }' "$REG")"
         tmp="$(mktemp)"
         awk -F: -v tok="$tok" '
             /^[[:space:]]*#/ { print; next }
@@ -197,6 +296,7 @@ case "$cmd" in
             exit 1
         fi
         mv "$tmp" "$REG"; chmod 600 "$REG"
+        guard_no_silent_drop "$removed_id"
         mirror_and_restart
         echo "==> Токен отозван."
         ;;

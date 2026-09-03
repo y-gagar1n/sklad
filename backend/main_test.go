@@ -571,6 +571,30 @@ func TestParseTokensFileReadOnly(t *testing.T) {
 	}
 }
 
+// Хвостовой алиас-комментарий ("# кому выдан") после токена/модификатора — не
+// ломает разбор, как и обычный комментарий с начала строки (см. sklad-tokens.sh
+// add-token --label, который дописывает такие комментарии в реестр).
+func TestParseTokensFileTrailingLabelComment(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "tokens")
+
+	os.WriteFile(p, []byte(
+		"anya: aaa  # Аня, телефон\nbob: bbb ro  # Боб — только чтение\n#просто комментарий\n"), 0o600)
+	m, err := parseTokensFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m["aaa"] != (tenantAuth{tenant: "anya"}) {
+		t.Fatalf("anya должна быть read-write несмотря на алиас: %#v", m["aaa"])
+	}
+	if m["bbb"] != (tenantAuth{tenant: "bob", readOnly: true}) {
+		t.Fatalf("bob должен остаться read-only несмотря на алиас: %#v", m["bbb"])
+	}
+	if len(m) != 2 {
+		t.Fatalf("лишние записи: %#v", m)
+	}
+}
+
 // Обратная совместимость: нет файла → одиночный токен из env как тенант "default".
 func TestLoadTokensEnvFallback(t *testing.T) {
 	t.Setenv("SKLAD_SYNC_TOKEN", "legacy")

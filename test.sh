@@ -3,3 +3,4 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 node --test "tests/**/*.test.mjs"
+bash tests/sklad-tokens.test.sh
