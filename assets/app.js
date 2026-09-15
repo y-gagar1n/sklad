@@ -469,6 +469,7 @@ function renderItemsList() {
 
   const q = itemSearch.trim().toLowerCase();
   const opts = store.calcOpts();
+  const multiFloor = store.floors().length > 1;
   let shown = 0;
 
   const html = cats
@@ -522,6 +523,13 @@ function renderItemsList() {
           inner += its
             .map((it) => {
               const s = itemSummary(store.movementsForItem(it.id), it, opts);
+              // «Всего» по всем этажам — рядом с остатком текущего этажа, чтобы
+              // не ходить за этим в Аналитику. Смысл только когда этажей больше
+              // одного (иначе это то же самое число).
+              const allFloorsHtml =
+                multiFloor
+                  ? `<div class="sub">всего ${fmt(store.stockForItem(it.id, null))} ${esc(un(it.unit))}</div>`
+                  : "";
               return `<div class="list-item" data-item="${it.id}">
               <span class="dot ${s.urgency}"></span>
               <div class="grow">
@@ -531,6 +539,7 @@ function renderItemsList() {
               <div class="nowrap" style="text-align:right">
                 <div style="font-weight:800">${fmt(s.stock)}</div>
                 <div class="sub">${esc(un(it.unit))}</div>
+                ${allFloorsHtml}
               </div>
               <span class="chev">›</span>
             </div>`;
