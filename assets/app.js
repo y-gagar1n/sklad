@@ -230,13 +230,48 @@ function floorBar() {
 
 // ── Экран: Обзор ───────────────────────────────────────────────────────────
 
+// «Все этажи» — отдельный, локальный для Обзора режим (не путать с
+// activeFloorId, который переключают чипы этажей на Товарах/Вводе и которым
+// Обзор пользуется по умолчанию): агрегирует остаток/расход/рекомендацию по
+// всем этажам сразу, по аналогии с масштабом «Все этажи» в Аналитике
+// (analyticsFloor). Клик по чипу конкретного этажа сбрасывает флаг обратно —
+// см. общий обработчик [data-floor].
+let overviewAllFloors = false;
+
+// Чипы этажей Обзора: реальные этажи (переключают activeFloorId, как везде)
+// плюс «Все этажи», если этажей больше одного.
+function overviewFloorBar() {
+  const fl = store.floors();
+  const active = store.getActiveFloorId();
+  return `<div class="floor-bar">
+    ${fl
+      .map(
+        (f) =>
+          `<button class="floor-chip ${!overviewAllFloors && f.id === active ? "on" : ""}" data-floor="${f.id}">${esc(f.name)}</button>`,
+      )
+      .join("")}
+    ${
+      fl.length > 1
+        ? `<button class="floor-chip ${overviewAllFloors ? "on" : ""}" data-ov-all-floors>Все этажи</button>`
+        : ""
+    }
+    <button class="floor-chip add" data-act="add-floor" title="Добавить этаж" ${roAttr()}>＋</button>
+  </div>`;
+}
+
 function renderOverview() {
   const view = $("#view-overview");
+  // Последний этаж удалили, пока был выбран режим «Все этажи» на одном этаже —
+  // не оставляем экран в бессмысленном состоянии.
+  if (overviewAllFloors && store.floors().length < 2) overviewAllFloors = false;
+
   // Пусто ли приложение — по глобальному списку; отображение фильтруем по
-  // видимости на активном этаже (скрытые на этаже категории не показываем).
+  // видимости на активном этаже (скрытые на этаже категории не показываем),
+  // либо показываем всё сразу — в режиме «Все этажи».
   const allGlobal = store.allItems();
-  const cats = store.categoriesForFloor();
-  const items = store.allItemsForFloor();
+  const floorScope = overviewAllFloors ? null : store.getActiveFloorId();
+  const cats = overviewAllFloors ? store.categories() : store.categoriesForFloor();
+  const items = overviewAllFloors ? allGlobal : store.allItemsForFloor();
 
   if (allGlobal.length === 0) {
     view.innerHTML = emptyState(
@@ -252,7 +287,7 @@ function renderOverview() {
 
   const opts = store.calcOpts();
   const rows = items.map((it) => {
-    const s = itemSummary(store.movementsForItem(it.id), it, opts);
+    const s = itemSummary(store.movementsForItem(it.id, floorScope), it, opts);
     return { it, s };
   });
 
@@ -265,7 +300,7 @@ function renderOverview() {
   const soonCount = rows.filter((r) => r.s.urgency === URGENCY.SOON).length;
 
   let html =
-    floorBar() +
+    overviewFloorBar() +
     `
     <div class="metric-grid">
       <div class="metric">
@@ -311,7 +346,7 @@ function renderOverview() {
       cats
         .map((c) => {
           const its = store.itemsOf(c.id);
-          const total = its.reduce((sum, it) => sum + store.stockForItem(it.id), 0);
+          const total = its.reduce((sum, it) => sum + store.stockForItem(it.id, floorScope), 0);
           return `<div class="list-item" data-cat-jump="${c.id}">
             <div class="grow">
               <div class="name">${esc(c.name)}</div>
@@ -1884,18 +1919,32 @@ document.addEventListener("click", (e) => {
     return;
   }
 
-  // Переключение этажа по чипу.
+  // Переключение этажа по чипу. Реальный этаж — обычный глобальный переход,
+  // заодно выходит из локального режима «Все этажи» на Обзоре (если он был).
   const floorChip = t.closest("[data-floor]");
   if (floorChip) {
+    overviewAllFloors = false;
     store.setActiveFloor(floorChip.dataset.floor);
+    render();
+    return;
+  }
+  // Чип «Все этажи» на Обзоре — локальный режим этого экрана, activeFloorId
+  // не трогает (см. overviewFloorBar/overviewAllFloors).
+  if (t.closest("[data-ov-all-floors]")) {
+    overviewAllFloors = true;
     render();
     return;
   }
   // Клик по строке товара (не по кнопке и не по действию) → детали.
   if (itemRow && !t.closest("button") && !t.closest("[data-act]") && itemRow.dataset.item) {
-    // Из аналитики карточку открываем в её масштабе: null = все этажи (колонки),
-    // id этажа = сводка по нему. Из прочих экранов scope не задаём — активный этаж.
-    const scope = itemRow.closest("#view-analytics") ? analyticsFloor : undefined;
+    // Из аналитики и из Обзора в режиме «Все этажи» карточку открываем в этом
+    // масштабе: null = все этажи (колонки), id этажа = сводка по нему. Из
+    // прочих экранов scope не задаём — активный этаж.
+    const scope = itemRow.closest("#view-analytics")
+      ? analyticsFloor
+      : itemRow.closest("#view-overview") && overviewAllFloors
+        ? null
+        : undefined;
     sheetItemDetail(itemRow.dataset.item, { scope });
     return;
   }
