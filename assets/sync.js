@@ -120,6 +120,40 @@ export function snapshotFromRecords(per) {
   return snap;
 }
 
+// Снимок после push+pull. Нельзя просто взять текущие локальные записи: пока
+// запрос был в сети, пользователь мог что-то поменять — такая правка не ушла на
+// сервер и должна остаться «неотправленной». Поэтому запись попадает в снимок,
+// только если её текущая метка — та, что мы отправили, получили с сервера или
+// уже знали; иначе оставляем прежнее значение снимка.
+export function snapshotAfterSync(prevSnapshot, push, pulled, after) {
+  const snap = {};
+  for (const name of COLLECTIONS) {
+    const prev = prevSnapshot[name] || {};
+    const known = new Map();
+    for (const rec of push[name] || []) known.set(rec.id, new Set([rec.updatedAt]));
+    for (const rec of pulled[name] || []) {
+      if (!known.has(rec.id)) known.set(rec.id, new Set());
+      known.get(rec.id).add(rec.updatedAt);
+    }
+    snap[name] = {};
+    const seen = new Set();
+    for (const rec of after[name] || []) {
+      seen.add(rec.id);
+      if (known.get(rec.id)?.has(rec.updatedAt) || prev[rec.id] === rec.updatedAt) {
+        snap[name][rec.id] = rec.updatedAt;
+      } else if (prev[rec.id] !== undefined) {
+        snap[name][rec.id] = prev[rec.id];
+      }
+    }
+    // Запись исчезла локально во время синка — оставляем в снимке, чтобы
+    // computePush потом отправил по ней тумбстоун.
+    for (const id of Object.keys(prev)) {
+      if (!seen.has(id)) snap[name][id] = prev[id];
+    }
+  }
+  return snap;
+}
+
 // Снимок для случая, когда мы приняли pull, но НЕ пушили (пустой запрос — как
 // testConnection, или read-only токен в syncNow): помечаем «уже на сервере»
 // только те id, что реально пришли с сервера, остальной снимок не трогаем.
@@ -165,6 +199,14 @@ export function computePush(local, snapshot, nowMs) {
     push[name] = out;
   }
   return push;
+}
+
+// Есть ли живые (не удалённые) записи склада; settings не в счёт — это
+// синглтон, он есть всегда.
+function hasLiveData(per) {
+  return ["categories", "items", "floors", "movements"].some((n) =>
+    (per[n] || []).some((r) => !r.deleted),
+  );
 }
 
 function hasAny(push) {
@@ -330,7 +372,7 @@ export async function syncNow() {
           lastSeq: resp.seq || 0,
           snapshot: skipPush
             ? mergeSnapshot(syncStateFor(cfg.url).snapshot, per)
-            : snapshotFromRecords(store.exportRecords()),
+            : snapshotAfterSync(ss.snapshot, push, per, store.exportRecords()),
         });
 
         setStatus({ syncing: false, lastSyncAt: Date.now(), lastError: "" });
@@ -357,6 +399,13 @@ export async function pullReplace() {
     rememberReadOnly(resp.readOnly);
     const per = {};
     for (const name of COLLECTIONS) per[name] = resp[name] || [];
+    // На сервере пусто, а на устройстве склад есть (новый/сброшенный сервер):
+    // «замена» превратилась бы в стирание всех данных телефона. Отказываем —
+    // правильный путь тут обычный синк, он отправит локальное на сервер.
+    if (!hasLiveData(per) && hasLiveData(store.exportRecords())) {
+      setStatus({ syncing: false, lastError: "" });
+      return { ok: false, reason: "server-empty", error: "на сервере нет данных — замена стёрла бы склад на этом устройстве. Нажмите «Синхронизировать сейчас», чтобы отправить данные на сервер." };
+    }
     oplog.log("pull-replace", summarize(per));
     store.replaceFromServerRecords(per);
     saveSyncState({

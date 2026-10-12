@@ -617,3 +617,48 @@ test("состояние синка от старого клиента (без u
   await sync.syncNow();
   assert.ok(server.coll.categories[c.id]);
 });
+
+test("правка во время синка не объявляется отправленной: уедет следующим синком", async () => {
+  fresh();
+  store.addCategory("До синка");
+  // Пока запрос «в сети», пользователь добавляет позицию.
+  const realFetch = globalThis.fetch;
+  let added;
+  globalThis.fetch = async (url, opts) => {
+    added = store.addCategory("Во время синка");
+    return realFetch(url, opts);
+  };
+  try {
+    await sync.syncNow();
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.ok(sync.pendingCount() > 0, "правка во время синка должна оставаться неотправленной");
+  await sync.syncNow();
+  assert.ok(server.coll.categories[added.id], "и доехать до сервера следующим синком");
+});
+
+test("тумбстоун пропавшей записи уходит один раз, а не на каждом синке", async () => {
+  fresh();
+  const c = store.addCategory("Старое");
+  await sync.syncNow();
+  store.replaceState({}); // запись исчезла целиком (повторный импорт)
+  await sync.syncNow();
+  assert.equal(server.coll.categories[c.id].deleted, true);
+  assert.equal(sync.pendingCount(), 0);
+  const seq = server.seq;
+  await sync.syncNow();
+  await sync.syncNow();
+  assert.equal(server.seq, seq, "повторные синки ничего не шлют");
+});
+
+test("pullReplace с пустого сервера не стирает склад на устройстве", async () => {
+  fresh();
+  const c = store.addCategory("Молоко");
+  const r = await sync.pullReplace(); // сервер тенанта пуст (новая VM)
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "server-empty");
+  assert.ok(store.getCategory(c.id), "локальные данные на месте");
+  await sync.syncNow();
+  assert.ok(server.coll.categories[c.id], "и уезжают обычным синком");
+});
