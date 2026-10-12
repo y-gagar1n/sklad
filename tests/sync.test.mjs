@@ -490,3 +490,130 @@ test("sendLogs: непустой журнал уезжает на /client-logs �
   assert.equal(clientLogs.get("t").length, 2);
   assert.equal(clientLogs.get("t")[0].event, "sync-error");
 });
+
+// ── Переезд/потеря сервера ───────────────────────────────────────────────
+
+// Сервер тенанта "t" потерял данные (новая VM без файла): пустая модель.
+function loseServer() {
+  server = makeServer();
+  tenants.set("t", server);
+}
+
+test("serverWasReset: seq сервера меньше нашего курсора", () => {
+  assert.equal(sync.serverWasReset(10, 3), true);
+  assert.equal(sync.serverWasReset(10, 0), true);
+  assert.equal(sync.serverWasReset(10, undefined), true);
+  assert.equal(sync.serverWasReset(10, 10), false);
+  assert.equal(sync.serverWasReset(0, 0), false);
+});
+
+test("сервер сброшен по тому же адресу: syncNow заново отправляет всё локальное", async () => {
+  fresh();
+  const c = store.addCategory("Молоко");
+  const it = store.addItem(c.id, { name: "Коровье" });
+  store.addMovement(it.id, { type: "in", qty: 5 });
+  await sync.syncNow();
+  assert.equal(sync.pendingCount(), 0);
+
+  loseServer();
+  const r = await sync.syncNow();
+  assert.equal(r.ok, true);
+  assert.ok(server.coll.categories[c.id]);
+  assert.ok(server.coll.items[it.id]);
+  assert.equal(Object.keys(server.coll.movements).length, 1);
+  assert.equal(sync.pendingCount(), 0);
+  // Курсор — от нового сервера: следующий синк ничего лишнего не шлёт.
+  const before = server.seq;
+  await sync.syncNow();
+  assert.equal(server.seq, before);
+});
+
+test("смена адреса сервера: всё локальное уезжает, даже если seq нового сервера больше нашего", async () => {
+  fresh();
+  const c = store.addCategory("Молоко");
+  await sync.syncNow();
+  const oldSeq = server.seq;
+
+  // Новый сервер, куда другое устройство уже успело накидать много записей —
+  // его seq больше нашего курсора, по seq сброс не распознать.
+  loseServer();
+  const t = Date.now();
+  for (let i = 0; i < oldSeq + 5; i++) {
+    server.apply("floors", [{ id: "F" + i, updatedAt: t, deleted: false, data: { name: "Этаж " + i, order: i } }]);
+  }
+  assert.ok(server.seq > oldSeq);
+
+  sync.setConfig({ url: "https://new.example", token: "t" });
+  const r = await sync.syncNow();
+  assert.equal(r.ok, true);
+  assert.ok(server.coll.categories[c.id], "своя категория доехала до нового сервера");
+  assert.ok(store.getFloor("F0"), "чужие этажи приехали");
+});
+
+test("testConnection на новом сервере не объявляет локальное «уже отправленным»", async () => {
+  fresh();
+  const c = store.addCategory("Чай");
+  await sync.syncNow();
+
+  loseServer();
+  const tc = await sync.testConnection("https://new.example", "t");
+  assert.equal(tc.ok, true);
+  sync.setConfig({ url: "https://new.example", token: "t" });
+  assert.ok(sync.pendingCount() > 0);
+  await sync.syncNow();
+  assert.ok(server.coll.categories[c.id]);
+  assert.equal(sync.pendingCount(), 0);
+});
+
+test("переезд с двух устройств одного склада: LWW оставляет более свежую версию", async () => {
+  fresh();
+  const c = store.addCategory("Старое имя");
+  await sync.syncNow();
+  const devA = JSON.stringify([...mem]);   // устройство A: старая версия
+
+  store.renameCategory(c.id, "Новое имя"); // устройство B: правка свежее
+  await sync.syncNow();
+  const devB = JSON.stringify([...mem]);
+
+  function become(dev) {
+    mem.clear();
+    for (const [k, v] of JSON.parse(dev)) mem.set(k, v);
+    store.replaceState(JSON.parse(mem.get("sklad-state-v1") || "{}"));
+  }
+
+  // Оба устройства переезжают на новый адрес (как migrateServerUrl при загрузке).
+  loseServer();
+  become(devB);                            // свежий телефон синкается первым
+  sync.setConfig({ url: "https://new.example", token: "t" });
+  await sync.syncNow();
+  become(devA);
+  sync.setConfig({ url: "https://new.example", token: "t" });
+  await sync.syncNow();
+  assert.equal(server.coll.categories[c.id].data.name, "Новое имя");
+  assert.equal(store.getCategory(c.id).name, "Новое имя"); // A подтянул свежее
+});
+
+test("migrateServerUrl: старый адрес переписывается, токен сохраняется, чужой не трогается", () => {
+  fresh();
+  sync.setConfig({ url: "https://old.example/", token: "tok" });
+  assert.equal(sync.migrateServerUrl(["https://old.example"], "https://new.example"), true);
+  assert.deepEqual(
+    { url: sync.getConfig().url, token: sync.getConfig().token },
+    { url: "https://new.example", token: "tok" },
+  );
+  sync.setConfig({ url: "https://mine.example", token: "tok" });
+  assert.equal(sync.migrateServerUrl(["https://old.example"], "https://new.example"), false);
+  assert.equal(sync.getConfig().url, "https://mine.example");
+});
+
+test("состояние синка от старого клиента (без url) → полный пересинк", async () => {
+  fresh();
+  const c = store.addCategory("Молоко");
+  // Так его записывал прежний клиент: курсор и снимок «всё отправлено», без url.
+  localStorage.setItem("sklad-syncstate-v1", JSON.stringify({
+    lastSeq: 0,
+    snapshot: { categories: { [c.id]: store.exportRecords().categories[0].updatedAt } },
+  }));
+  await sync.syncNow();
+  assert.ok(server.coll.categories[c.id]);
+});

@@ -22,7 +22,7 @@
 # Запускать при первом деплое. Ротация/добавление токенов — через sklad-tokens.sh.
 set -euo pipefail
 
-REMOTE="${1:-yury-timofeev@213.165.212.180}"
+REMOTE="${1:-root@164.92.247.191}"
 HOST="${REMOTE#*@}"
 SECRETS_DIR="${SKLAD_SYNC_SECRETS_DIR:-$HOME/.config/sklad-sync}"
 REG="$SECRETS_DIR/tokens"

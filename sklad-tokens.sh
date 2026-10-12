@@ -29,12 +29,12 @@
 # --label текст — алиас токена (кому/на каком устройстве), пишется как "# текст"
 #   в конце строки реестра — виден в list, сервер его игнорирует.
 # --force — обойти guard_no_silent_drop (см. ниже) и всё равно перезаписать реестр на VM.
-# Хост VM: env SKLAD_REMOTE (по умолчанию yury-timofeev@213.165.212.180).
+# Хост VM: env SKLAD_REMOTE (по умолчанию root@164.92.247.191).
 #
 # ⛔ Токены — секрет: реестр не коммитить (он и так вне репозитория).
 set -euo pipefail
 
-REMOTE="${SKLAD_REMOTE:-yury-timofeev@213.165.212.180}"
+REMOTE="${SKLAD_REMOTE:-root@164.92.247.191}"
 REG="${SKLAD_SYNC_TOKENS_FILE:-$HOME/.config/sklad-sync/tokens}"
 FORCE="${FORCE:-0}"
 

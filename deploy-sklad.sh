@@ -20,7 +20,7 @@
 # Использование: ./deploy-sklad.sh [user@host]
 set -euo pipefail
 
-REMOTE="${1:-yury-timofeev@213.165.212.180}"
+REMOTE="${1:-root@164.92.247.191}"
 REPO_ROOT="$(cd "$(dirname "$0")" && pwd)"
 BUILD_DIR="$(mktemp -d)"
 trap 'rm -rf "$BUILD_DIR"' EXIT

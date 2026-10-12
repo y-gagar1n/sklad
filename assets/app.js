@@ -2161,7 +2161,12 @@ $("#xlsx-file").addEventListener("change", async (e) => {
 
 // ── Синхронизация: автозапуск и обновление статуса ─────────────────────────
 
-const DEFAULT_SYNC_URL = "https://213-165-212-180.sslip.io";
+const DEFAULT_SYNC_URL = "https://164-92-247-191.sslip.io";
+// Прежние адреса сервера (VM 213.165.212.180 потеряна в октябре 2026). Устройства,
+// настроенные на них, молча переезжают на новый адрес; первый синк с новым
+// сервером отправит туда все локальные данные (см. syncStateFor в sync.js).
+const LEGACY_SYNC_URLS = ["https://213-165-212-180.sslip.io"];
+sync.migrateServerUrl(LEGACY_SYNC_URLS, DEFAULT_SYNC_URL);
 let autoSyncTimer = null;
 
 // Дебаунс автосинка после локальных правок.

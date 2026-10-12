@@ -16,7 +16,10 @@
 //                        на этом устройстве. У настоящего read-only токена
 //                        серверный readOnly и так true — тумблер там decorative
 //                        (см. isServerReadOnly в app.js).
-//   sklad-syncstate-v1   { lastSeq, snapshot: { coll: { id: updatedAt } } }
+//   sklad-syncstate-v1   { url, lastSeq, snapshot: { coll: { id: updatedAt } } }
+//                        — url: сервер, к которому относятся lastSeq/snapshot.
+//                        Сменился адрес (переезд сервера) — состояние чужое,
+//                        начинаем с нуля: pull всего и push всего локального.
 import * as store from "./store.js";
 import * as oplog from "./oplog.js";
 
@@ -59,6 +62,16 @@ export function setConfig({ url, token }) {
   return cfg;
 }
 
+// Переезд сервера: если устройство настроено на один из старых адресов —
+// переписываем его на новый, токен и прочие настройки не трогаем. Возвращает
+// true, если адрес поменяли.
+export function migrateServerUrl(oldUrls, newUrl) {
+  const cfg = getConfig();
+  if (!cfg.url || !oldUrls.map(normUrl).includes(cfg.url)) return false;
+  localStorage.setItem(CONFIG_KEY, JSON.stringify({ ...cfg, url: normUrl(newUrl) }));
+  return true;
+}
+
 export function isConfigured() {
   const c = getConfig();
   return !!(c.url && c.token);
@@ -73,10 +86,18 @@ function normUrl(url) {
 function loadSyncState() {
   try {
     const s = JSON.parse(localStorage.getItem(STATE_KEY) || "{}");
-    return { lastSeq: s.lastSeq || 0, snapshot: s.snapshot || {} };
+    return { url: s.url || "", lastSeq: s.lastSeq || 0, snapshot: s.snapshot || {} };
   } catch {
-    return { lastSeq: 0, snapshot: {} };
+    return { url: "", lastSeq: 0, snapshot: {} };
   }
+}
+
+// Состояние синка для текущего сервера. Если оно записано для другого адреса
+// (или старым клиентом без url) — оно ничего не говорит о новом сервере:
+// считаем, что там пусто, иначе снимок «уже отправлено» не даст запушить данные.
+function syncStateFor(url) {
+  const s = loadSyncState();
+  return s.url === url ? s : { url, lastSeq: 0, snapshot: {} };
 }
 
 function saveSyncState(s) {
@@ -111,6 +132,13 @@ function mergeSnapshot(prevSnapshot, per) {
     for (const rec of per[name] || []) snap[name][rec.id] = rec.updatedAt;
   }
   return snap;
+}
+
+// Сервер потерял данные (пересоздан, переехал без файла): его seq меньше
+// курсора, который мы уже от него получали. seq монотонен, так что в живом
+// сервере такого не бывает.
+export function serverWasReset(lastSeq, respSeq) {
+  return (respSeq || 0) < (lastSeq || 0);
 }
 
 // Что нужно отправить: локальные записи, изменившиеся с прошлого снимка, плюс
@@ -236,7 +264,7 @@ export function setForceReadOnly(flag) {
 // Число несинхронизованных изменений (для показа в UI).
 export function pendingCount() {
   if (!isConfigured()) return 0;
-  const push = computePush(store.exportRecords(), loadSyncState().snapshot, Date.now());
+  const push = computePush(store.exportRecords(), syncStateFor(getConfig().url).snapshot, Date.now());
   return COLLECTIONS.reduce((n, name) => n + (push[name] || []).length, 0);
 }
 
@@ -251,50 +279,63 @@ export async function syncNow() {
     const cfg = getConfig();
     setStatus({ syncing: true, lastError: "" });
     try {
-      const ss = loadSyncState();
-      const local = store.exportRecords();
-      const push = computePush(local, ss.snapshot, Date.now());
+      // Второй проход — только если сервер оказался сброшен: тогда снимок
+      // обнулён и мы заново отправляем всё локальное (LWW на сервере разрулит).
+      for (let pass = 0; ; pass++) {
+        const ss = syncStateFor(cfg.url);
+        const local = store.exportRecords();
+        const push = computePush(local, ss.snapshot, Date.now());
 
-      // Пропускаем push, если сервер уже сказал, что токен read-only (иначе он
-      // отклонит непустой push 403-м на весь запрос — и мы потеряем pull-часть
-      // вместе с ним), либо пользователь сам включил локальную проверку
-      // forceReadOnly (Настройки → Синхронизация) — тогда пропускаем без
-      // обращения к серверу вообще, чисто по своему выбору.
-      const skipPush = cfg.readOnly || cfg.forceReadOnly;
-      const body = { since: ss.lastSeq };
-      if (!skipPush) {
-        for (const name of COLLECTIONS) body[name] = push[name];
+        // Пропускаем push, если сервер уже сказал, что токен read-only (иначе он
+        // отклонит непустой push 403-м на весь запрос — и мы потеряем pull-часть
+        // вместе с ним), либо пользователь сам включил локальную проверку
+        // forceReadOnly (Настройки → Синхронизация) — тогда пропускаем без
+        // обращения к серверу вообще, чисто по своему выбору.
+        const skipPush = cfg.readOnly || cfg.forceReadOnly;
+        const body = { since: ss.lastSeq };
+        if (!skipPush) {
+          for (const name of COLLECTIONS) body[name] = push[name];
+        }
+        const pushSummary = summarize(push);
+        if (Object.keys(pushSummary).length) {
+          oplog.log("sync-push", { since: ss.lastSeq, skipped: !!skipPush, ...pushSummary });
+        }
+
+        const resp = await postSync(cfg, body);
+        rememberReadOnly(resp.readOnly);
+
+        // Вливаем серверную дельту (LWW) — включая наши же эхо-записи.
+        const per = {};
+        for (const name of COLLECTIONS) per[name] = resp[name] || [];
+        const pullSummary = summarize(per);
+        if (Object.keys(pullSummary).length) {
+          oplog.log("sync-pull", { seq: resp.seq, ...pullSummary });
+        }
+        store.applyServerRecords(per);
+
+        if (pass === 0 && serverWasReset(ss.lastSeq, resp.seq)) {
+          oplog.log("server-reset", { lastSeq: ss.lastSeq, seq: resp.seq || 0 });
+          // Наш push ушёл против снимка старого сервера, т.е. почти пустой.
+          // Серверное уже влили выше; помним только его — остальное допушим.
+          saveSyncState({ url: cfg.url, lastSeq: 0, snapshot: mergeSnapshot({}, per) });
+          if (!skipPush) continue;
+        }
+
+        // Снимок: если реально пушили — текущие локальные записи (после слияния
+        // мы = сервер). Если push пропустили — только то, что правда пришло с
+        // сервера; локальные неотправленные правки остаются «в очереди», их
+        // pendingCount() продолжит показывать как неотправленные.
+        saveSyncState({
+          url: cfg.url,
+          lastSeq: resp.seq || 0,
+          snapshot: skipPush
+            ? mergeSnapshot(syncStateFor(cfg.url).snapshot, per)
+            : snapshotFromRecords(store.exportRecords()),
+        });
+
+        setStatus({ syncing: false, lastSyncAt: Date.now(), lastError: "" });
+        return { ok: true, seq: resp.seq, pushed: !skipPush && hasAny(push) };
       }
-      const pushSummary = summarize(push);
-      if (Object.keys(pushSummary).length) {
-        oplog.log("sync-push", { since: ss.lastSeq, skipped: !!skipPush, ...pushSummary });
-      }
-
-      const resp = await postSync(cfg, body);
-      rememberReadOnly(resp.readOnly);
-
-      // Вливаем серверную дельту (LWW) — включая наши же эхо-записи.
-      const per = {};
-      for (const name of COLLECTIONS) per[name] = resp[name] || [];
-      const pullSummary = summarize(per);
-      if (Object.keys(pullSummary).length) {
-        oplog.log("sync-pull", { seq: resp.seq, ...pullSummary });
-      }
-      store.applyServerRecords(per);
-
-      // Снимок: если реально пушили — текущие локальные записи (после слияния
-      // мы = сервер). Если push пропустили — только то, что правда пришло с
-      // сервера; локальные неотправленные правки остаются «в очереди», их
-      // pendingCount() продолжит показывать как неотправленные.
-      saveSyncState({
-        lastSeq: resp.seq || 0,
-        snapshot: skipPush
-          ? mergeSnapshot(ss.snapshot, per)
-          : snapshotFromRecords(store.exportRecords()),
-      });
-
-      setStatus({ syncing: false, lastSyncAt: Date.now(), lastError: "" });
-      return { ok: true, seq: resp.seq, pushed: !skipPush && hasAny(push) };
     } catch (e) {
       setStatus({ syncing: false, lastError: e.message || String(e) });
       oplog.log("sync-error", { message: e.message || String(e) });
@@ -319,6 +360,7 @@ export async function pullReplace() {
     oplog.log("pull-replace", summarize(per));
     store.replaceFromServerRecords(per);
     saveSyncState({
+      url: cfg.url,
       lastSeq: resp.seq || 0,
       snapshot: snapshotFromRecords(store.exportRecords()),
     });
@@ -347,9 +389,14 @@ export async function testConnection(url, token) {
     const per = {};
     for (const name of COLLECTIONS) per[name] = resp[name] || [];
     store.applyServerRecords(per);
+    // Снимок другого сервера (или сброшенного) не переносим: иначе локальные
+    // данные будут считаться «уже отправленными» и не уедут на новый сервер.
+    const prev = syncStateFor(cfg.url);
+    const keep = !serverWasReset(prev.lastSeq, resp.seq);
     saveSyncState({
+      url: cfg.url,
       lastSeq: resp.seq || 0,
-      snapshot: mergeSnapshot(loadSyncState().snapshot, per),
+      snapshot: mergeSnapshot(keep ? prev.snapshot : {}, per),
     });
     return { ok: true, readOnly: !!resp.readOnly };
   } catch (e) {

@@ -7,8 +7,8 @@
 #
 # Требуются два GitHub Actions Secret:
 #   SKLAD_DEPLOY_SSH_KEY     — приватный ключ отдельной deploy-пары (публичный дописан
-#                              в ~yury-timofeev/.ssh/authorized_keys на VM)
-#   SKLAD_DEPLOY_KNOWN_HOSTS — вывод `ssh-keyscan 213.165.212.180` (pin host-ключа)
+#                              в ~root/.ssh/authorized_keys на VM)
+#   SKLAD_DEPLOY_KNOWN_HOSTS — вывод `ssh-keyscan 164.92.247.191` (pin host-ключа)
 name: Deploy backend
 
 on:
@@ -57,4 +57,4 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           printf '%s\n' "${{ secrets.SKLAD_DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
       - name: Деплой на VM
-        run: ./deploy-sklad.sh yury-timofeev@213.165.212.180
+        run: ./deploy-sklad.sh root@164.92.247.191
