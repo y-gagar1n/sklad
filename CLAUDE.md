@@ -72,6 +72,8 @@
 `backend/deploy/*` работают **только** с namespace `sklad-sync`: пользователь
 `sklad-sync`, каталоги `/opt|/var/lib|/etc|/var/backups/sklad-sync`, порт 443,
 данные `/var/lib/sklad-sync/tenants/<tenantId>.json` (бэкап — tar.gz всего каталога).
+Бэкапы с VM ежедневно копируются на Mac (`./backup-to-mac.sh`, launchd-агент
+`com.yury-timofeev.sklad-backup`, в `~/Backups/sklad-sync`, хранятся год).
 **Не трогать** `todo-sync` (порт 8080, `/var/lib/todo-sync/todo-sync.json`) и
 `agent-site` (порт 80). Деплой проверяет, что 443 не занят чужим сервисом.
 
@@ -123,6 +125,7 @@ cd backend && go test -race ./...  # тесты сервера
 
 ./bootstrap-sklad.sh               # разово: секреты на VM (домен+CORS+реестр токенов)
 ./deploy-sklad.sh                  # деплой на VM
+./backup-to-mac.sh                 # забрать бэкапы с VM на Mac (install — ежедневно через launchd)
 ./sklad-tokens.sh add <tenantId>            # завести пользователя (без редеплоя)
 ./sklad-tokens.sh add-token <tenantId> --ro # выдать read-only токен тому же складу
 ```
